@@ -1,0 +1,4 @@
+[submodule "external_repos/nba_data"]
+	path = external_repos/nba_data
+	url = https://github.com/shufinskiy/nba_data.git
+	branch = main
