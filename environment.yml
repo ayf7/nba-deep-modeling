@@ -1,0 +1,18 @@
+channels:
+  - defaults
+dependencies:
+  - python=3.12.3
+  - sqlite
+  - pip
+  - pip:
+      - beautifulsoup4
+      - duckdb
+      - ipykernel
+      - lxml
+      - numpy
+      - pandas
+      - pyarrow
+      - requests
+      - scikit-learn
+      - torch
+      - xgboost
