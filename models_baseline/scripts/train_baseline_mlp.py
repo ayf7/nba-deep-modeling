@@ -30,32 +30,41 @@ from modeling_common import (
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "baseline_mlp"
 
 
-class TwoLayerMLP(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim_1: int, hidden_dim_2: int, dropout: float) -> None:
+class FourLayerMLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim_1: int,
+        hidden_dim_2: int,
+        hidden_dim_3: int,
+        hidden_dim_4: int,
+        dropout: float,
+    ) -> None:
         super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim_1),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim_1, hidden_dim_2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim_2, 1),
-        )
+        dims = [input_dim, hidden_dim_1, hidden_dim_2, hidden_dim_3, hidden_dim_4]
+        layers: list[nn.Module] = []
+        for in_dim, out_dim in zip(dims[:-1], dims[1:]):
+            layers.append(nn.Linear(in_dim, out_dim))
+            layers.append(nn.GELU())
+            layers.append(nn.Dropout(dropout))
+        layers.append(nn.Linear(hidden_dim_4, 1))
+        self.network = nn.Sequential(*layers)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.network(features).squeeze(-1)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train 2-layer PyTorch MLP baseline.")
+    parser = argparse.ArgumentParser(description="Train 4-layer PyTorch MLP baseline (GELU).")
     parser.add_argument("--features-db", type=Path, default=DEFAULT_FEATURES_DB)
     parser.add_argument("--table", default="model_games")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--min-games-before", type=int, default=10)
-    parser.add_argument("--hidden-dim-1", type=int, default=64)
-    parser.add_argument("--hidden-dim-2", type=int, default=32)
+    parser.add_argument("--hidden-dim-1", type=int, default=128)
+    parser.add_argument("--hidden-dim-2", type=int, default=64)
+    parser.add_argument("--hidden-dim-3", type=int, default=32)
+    parser.add_argument("--hidden-dim-4", type=int, default=16)
     parser.add_argument("--dropout", type=float, default=0.10)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--weight-decay", type=float, default=0.001)
@@ -200,10 +209,12 @@ def main() -> None:
     train_fit_y = train_fit_df[LABEL_COLUMN].to_numpy(dtype="float32")
     validation_y = validation_df[LABEL_COLUMN].to_numpy(dtype="float32")
 
-    model = TwoLayerMLP(
-        input_dim=len(features),
+    model = FourLayerMLP(
+        input_dim=train_x.shape[1],
         hidden_dim_1=args.hidden_dim_1,
         hidden_dim_2=args.hidden_dim_2,
+        hidden_dim_3=args.hidden_dim_3,
+        hidden_dim_4=args.hidden_dim_4,
         dropout=args.dropout,
     ).to(device)
     training_summary = train_model(
@@ -226,6 +237,9 @@ def main() -> None:
     model_params = {
         "hidden_dim_1": args.hidden_dim_1,
         "hidden_dim_2": args.hidden_dim_2,
+        "hidden_dim_3": args.hidden_dim_3,
+        "hidden_dim_4": args.hidden_dim_4,
+        "activation": "gelu",
         "dropout": args.dropout,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,

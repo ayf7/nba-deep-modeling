@@ -1,6 +1,6 @@
-# Modeling
+# Baseline Modeling
 
-Modeling code treats the feature database as an input. This lets us train on:
+Baseline modeling code treats the feature database as an input. This lets us train on:
 
 ```text
 data/artifacts/features.sqlite
@@ -13,7 +13,7 @@ without changing model code.
 ## Layout
 
 ```text
-models/
+models_baseline/
   scripts/
     train_baseline_logistic_regression.py
     train_baseline_xgboost.py
@@ -29,25 +29,25 @@ models/
 Train a logistic-regression baseline from the default feature database:
 
 ```bash
-python models/scripts/train_baseline_logistic_regression.py
+python models_baseline/scripts/train_baseline_logistic_regression.py
 ```
 
 Train an XGBoost baseline:
 
 ```bash
-python models/scripts/train_baseline_xgboost.py
+python models_baseline/scripts/train_baseline_xgboost.py
 ```
 
 Train a 2-layer PyTorch MLP baseline:
 
 ```bash
-python models/scripts/train_baseline_mlp.py
+python models_baseline/scripts/train_baseline_mlp.py
 ```
 
 Use a different feature database:
 
 ```bash
-python models/scripts/train_baseline_logistic_regression.py \
+python models_baseline/scripts/train_baseline_logistic_regression.py \
   --features-db data/artifacts/features_v2.sqlite
 ```
 
@@ -56,9 +56,9 @@ The script reads `model_games` and uses a chronological train/test split. It fil
 The default output directories are fixed by model:
 
 ```text
-models/artifacts/baseline_logistic/
-models/artifacts/baseline_xgboost/
-models/artifacts/baseline_mlp/
+models_baseline/artifacts/baseline_logistic/
+models_baseline/artifacts/baseline_xgboost/
+models_baseline/artifacts/baseline_mlp/
 ```
 
 Each output directory contains:
@@ -92,19 +92,19 @@ All other numeric columns are treated as candidate features unless explicitly ex
 Run an expanding-window monthly backtest:
 
 ```bash
-python models/scripts/backtest_baselines.py --model logistic
+python models_baseline/scripts/backtest_baselines.py --model logistic
 ```
 
 XGBoost:
 
 ```bash
-python models/scripts/backtest_baselines.py --model xgboost
+python models_baseline/scripts/backtest_baselines.py --model xgboost
 ```
 
 MLP:
 
 ```bash
-python models/scripts/backtest_baselines.py --model mlp
+python models_baseline/scripts/backtest_baselines.py --model mlp
 ```
 
 The MLP defaults to 100 maximum epochs with early stopping patience of 15 for
@@ -115,9 +115,9 @@ The default setup trains on games through `2023-12-31`, then evaluates one calen
 Outputs:
 
 ```text
-models/artifacts/backtest_logistic/
-models/artifacts/backtest_xgboost/
-models/artifacts/backtest_mlp/
+models_baseline/artifacts/backtest_logistic/
+models_baseline/artifacts/backtest_xgboost/
+models_baseline/artifacts/backtest_mlp/
   config.json
   overall_metrics.json
   window_metrics.csv
@@ -131,51 +131,51 @@ Pass `--output-dir` to write a run somewhere else.
 Evaluate a model's backtest predictions against matched moneyline odds:
 
 ```bash
-python models/scripts/evaluate_betting_strategy.py \
-  --predictions models/artifacts/backtest_xgboost/predictions.csv \
+python models_baseline/scripts/evaluate_betting_strategy.py \
+  --predictions models_baseline/artifacts/backtest_xgboost/predictions.csv \
   --strategy edge_threshold \
   --threshold 0.03 \
-  --output-dir models/artifacts/betting_xgboost_edge_003
+  --output-dir models_baseline/artifacts/betting_xgboost_edge_003
 ```
 
 Expected-value strategy:
 
 ```bash
-python models/scripts/evaluate_betting_strategy.py \
-  --predictions models/artifacts/backtest_xgboost/predictions.csv \
+python models_baseline/scripts/evaluate_betting_strategy.py \
+  --predictions models_baseline/artifacts/backtest_xgboost/predictions.csv \
   --strategy expected_value \
   --min-ev 0.02 \
-  --output-dir models/artifacts/betting_xgboost_ev_002
+  --output-dir models_baseline/artifacts/betting_xgboost_ev_002
 ```
 
 Predicted-winner strategy:
 
 ```bash
-python models/scripts/evaluate_betting_strategy.py \
-  --predictions models/artifacts/backtest_xgboost/predictions.csv \
+python models_baseline/scripts/evaluate_betting_strategy.py \
+  --predictions models_baseline/artifacts/backtest_xgboost/predictions.csv \
   --strategy predicted_winner \
-  --output-dir models/artifacts/betting_xgboost_predicted_winner
+  --output-dir models_baseline/artifacts/betting_xgboost_predicted_winner
 ```
 
 Market-only baselines use the same prediction file to define the evaluation
 horizon, but they ignore the model probability:
 
 ```bash
-python models/scripts/evaluate_betting_strategy.py \
-  --predictions models/artifacts/backtest_xgboost/predictions.csv \
+python models_baseline/scripts/evaluate_betting_strategy.py \
+  --predictions models_baseline/artifacts/backtest_xgboost/predictions.csv \
   --strategy favorite \
-  --output-dir models/artifacts/betting_baseline_favorite
+  --output-dir models_baseline/artifacts/betting_baseline_favorite
 
-python models/scripts/evaluate_betting_strategy.py \
-  --predictions models/artifacts/backtest_xgboost/predictions.csv \
+python models_baseline/scripts/evaluate_betting_strategy.py \
+  --predictions models_baseline/artifacts/backtest_xgboost/predictions.csv \
   --strategy underdog \
-  --output-dir models/artifacts/betting_baseline_underdog
+  --output-dir models_baseline/artifacts/betting_baseline_underdog
 
-python models/scripts/evaluate_betting_strategy.py \
-  --predictions models/artifacts/backtest_xgboost/predictions.csv \
+python models_baseline/scripts/evaluate_betting_strategy.py \
+  --predictions models_baseline/artifacts/backtest_xgboost/predictions.csv \
   --strategy random \
   --random-seed 0 \
-  --output-dir models/artifacts/betting_baseline_random
+  --output-dir models_baseline/artifacts/betting_baseline_random
 ```
 
 All strategies use flat `$1` stakes by default and average decimal odds from

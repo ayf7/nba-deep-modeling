@@ -10,7 +10,9 @@ The project uses three SQLite layers:
 nba_raw.sqlite       # one-to-one imports from external raw CSV archives
 oddsportal_moneyline.sqlite
 nba_core.sqlite      # cleaned, typed basketball tables
+player_matchup_training.sqlite
 features.sqlite      # model-facing labels/features
+features_embeddings_v1.sqlite
 ```
 
 ## Layout
@@ -25,7 +27,9 @@ data/
     nba_raw.sqlite
     oddsportal_moneyline.sqlite
     nba_core.sqlite
+    player_matchup_training.sqlite
     features.sqlite
+    features_embeddings_v1.sqlite
 ```
 
 ## NBA Data Conversion
@@ -87,6 +91,30 @@ player_matchups
 game_moneyline_odds
 ```
 
+## Player Matchup Training Rows
+
+Build grouped player-defender interaction rows for embedding models:
+
+```bash
+python data/scripts/build_player_matchup_training.py
+```
+
+This creates:
+
+```text
+data/artifacts/player_matchup_training.sqlite
+```
+
+The output table `matchup_training_rows` groups `player_matchups` by game,
+offensive player, defender, and offensive team. It uses `partial_possessions`
+as `exposure_possessions` and sums matchup outcome counts including
+`player_points`, field-goal attempts/makes, three-point attempts/makes,
+turnovers, assists, potential assists, free throws, and shooting fouls.
+
+Default filters keep rows with at least `0.5` partial possessions and `5`
+matchup seconds. Use `--min-exposure-possessions` and `--min-matchup-seconds`
+to change those thresholds.
+
 ## Feature Tables
 
 Build the model-facing database:
@@ -140,6 +168,26 @@ diff_rest_days
 ```
 
 Early-season rows intentionally have `NULL` rolling values when a team has no prior games. Modeling code should either filter warmup games or impute those values explicitly.
+
+## Embedding-Augmented Feature Tables
+
+After training player matchup embedding snapshots, build an augmented game
+feature database:
+
+```bash
+python models_embedding/scripts/build_embedding_game_features.py
+```
+
+This creates:
+
+```text
+data/artifacts/features_embeddings_v1.sqlite
+```
+
+The output `model_games` table starts from `features.sqlite` and adds
+leakage-safe player embedding matchup features. Each game receives the latest
+available embedding snapshot whose training data ends before the game date.
+Recent rotations are estimated from prior games only.
 
 ## OddsPortal Probe
 

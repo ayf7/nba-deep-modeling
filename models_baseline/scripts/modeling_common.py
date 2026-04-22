@@ -18,8 +18,9 @@ from sklearn.preprocessing import StandardScaler
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MODELS_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FEATURES_DB = PROJECT_ROOT / "data" / "artifacts" / "features.sqlite"
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "models" / "artifacts"
+DEFAULT_OUTPUT_ROOT = MODELS_ROOT / "artifacts"
 LABEL_COLUMN = "label_home_win"
 ID_COLUMNS = {
     "game_id",
@@ -47,7 +48,37 @@ def feature_columns(df: pd.DataFrame) -> list[str]:
     return numeric_candidates
 
 
-def prepare_model_frame(df: pd.DataFrame, table: str, min_games_before: int) -> tuple[pd.DataFrame, list[str]]:
+CYCLIC_DOW_HARMONICS = 2
+CYCLIC_DOS_HARMONICS = 3
+CYCLIC_DOS_PERIOD = 200.0
+CYCLIC_MOY_HARMONICS = 1
+
+
+def add_cyclic_features(df: pd.DataFrame) -> pd.DataFrame:
+    ts = pd.to_datetime(df["game_date"])
+    dow = ts.dt.dayofweek.to_numpy()
+    for k in range(1, CYCLIC_DOW_HARMONICS + 1):
+        df[f"cyc_dow_sin{k}"] = np.sin(2.0 * np.pi * k * dow / 7.0)
+        df[f"cyc_dow_cos{k}"] = np.cos(2.0 * np.pi * k * dow / 7.0)
+
+    season_start = df.groupby("season")["game_date"].transform("min")
+    dos = (ts - pd.to_datetime(season_start)).dt.days.to_numpy()
+    for k in range(1, CYCLIC_DOS_HARMONICS + 1):
+        df[f"cyc_dos_sin{k}"] = np.sin(2.0 * np.pi * k * dos / CYCLIC_DOS_PERIOD)
+        df[f"cyc_dos_cos{k}"] = np.cos(2.0 * np.pi * k * dos / CYCLIC_DOS_PERIOD)
+
+    moy = ts.dt.month.to_numpy()
+    for k in range(1, CYCLIC_MOY_HARMONICS + 1):
+        df[f"cyc_moy_sin{k}"] = np.sin(2.0 * np.pi * k * moy / 12.0)
+        df[f"cyc_moy_cos{k}"] = np.cos(2.0 * np.pi * k * moy / 12.0)
+
+    return df
+
+
+def prepare_model_frame(
+    df: pd.DataFrame, table: str, min_games_before: int,
+    *, cyclic: bool = True,
+) -> tuple[pd.DataFrame, list[str]]:
     required = {LABEL_COLUMN, "game_id", "game_date"}
     missing = sorted(required - set(df.columns))
     if missing:
@@ -58,6 +89,9 @@ def prepare_model_frame(df: pd.DataFrame, table: str, min_games_before: int) -> 
             (df["home_games_played_before"] >= min_games_before)
             & (df["away_games_played_before"] >= min_games_before)
         ].copy()
+
+    if cyclic:
+        df = add_cyclic_features(df)
 
     features = feature_columns(df)
     if not features:

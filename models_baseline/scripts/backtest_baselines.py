@@ -63,6 +63,9 @@ def mlp_params(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "hidden_dim_1": args.mlp_hidden_dim_1,
         "hidden_dim_2": args.mlp_hidden_dim_2,
+        "hidden_dim_3": args.mlp_hidden_dim_3,
+        "hidden_dim_4": args.mlp_hidden_dim_4,
+        "activation": "gelu",
         "dropout": args.mlp_dropout,
         "learning_rate": args.mlp_learning_rate,
         "weight_decay": args.mlp_weight_decay,
@@ -75,16 +78,30 @@ def mlp_params(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+MLP_FEATURE_CLAMPS: dict[str, float] = {
+    "embedding_checkpoint_lag_days": 35.0,
+    "embedding_max_training_lag_days": 365.0,
+}
+
+
+def _apply_mlp_feature_clamps(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col, upper in MLP_FEATURE_CLAMPS.items():
+        if col in df.columns:
+            df[col] = df[col].clip(upper=upper)
+    return df
+
+
 def fit_predict_mlp(
     args: argparse.Namespace,
     features: list[str],
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
-) -> tuple[np.ndarray, dict[str, Any]]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     try:
         import torch
         from train_baseline_mlp import (
-            TwoLayerMLP,
+            FourLayerMLP,
             predict_probabilities,
             set_seed,
             split_train_validation,
@@ -101,6 +118,8 @@ def fit_predict_mlp(
 
     set_seed(args.random_state)
     device = torch.device(args.mlp_device)
+    train_df = _apply_mlp_feature_clamps(train_df)
+    test_df = _apply_mlp_feature_clamps(test_df)
     train_fit_df, validation_df = split_train_validation(train_df, args.mlp_validation_fraction)
     training_args = argparse.Namespace(
         learning_rate=args.mlp_learning_rate,
@@ -116,10 +135,12 @@ def fit_predict_mlp(
     validation_x = preprocessor.transform(validation_df[features]).astype("float32")
     test_x = preprocessor.transform(test_df[features]).astype("float32")
 
-    model = TwoLayerMLP(
-        input_dim=len(features),
+    model = FourLayerMLP(
+        input_dim=train_fit_x.shape[1],
         hidden_dim_1=args.mlp_hidden_dim_1,
         hidden_dim_2=args.mlp_hidden_dim_2,
+        hidden_dim_3=args.mlp_hidden_dim_3,
+        hidden_dim_4=args.mlp_hidden_dim_4,
         dropout=args.mlp_dropout,
     ).to(device)
     training_summary = train_model(
@@ -132,7 +153,11 @@ def fit_predict_mlp(
         device,
     )
     probabilities = predict_probabilities(model, test_x, device, args.mlp_batch_size)
-    return probabilities, {**mlp_params(args), **training_summary}
+    train_full_x = preprocessor.transform(train_df[features]).astype("float32")
+    train_probabilities = predict_probabilities(
+        model, train_full_x, device, args.mlp_batch_size
+    )
+    return probabilities, train_probabilities, {**mlp_params(args), **training_summary}
 
 
 def parse_args() -> argparse.Namespace:
@@ -145,7 +170,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Directory for artifacts. Defaults to "
-            "models/artifacts/backtest_<model>."
+            "models_baseline/artifacts/backtest_<model>."
         ),
     )
     parser.add_argument("--model", choices=("logistic", "xgboost", "mlp"), default="logistic")
@@ -168,8 +193,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--xgb-learning-rate", type=float, default=0.05)
     parser.add_argument("--xgb-subsample", type=float, default=0.9)
     parser.add_argument("--xgb-colsample-bytree", type=float, default=0.9)
-    parser.add_argument("--mlp-hidden-dim-1", type=int, default=64)
-    parser.add_argument("--mlp-hidden-dim-2", type=int, default=32)
+    parser.add_argument("--mlp-hidden-dim-1", type=int, default=128)
+    parser.add_argument("--mlp-hidden-dim-2", type=int, default=64)
+    parser.add_argument("--mlp-hidden-dim-3", type=int, default=32)
+    parser.add_argument("--mlp-hidden-dim-4", type=int, default=16)
     parser.add_argument("--mlp-dropout", type=float, default=0.10)
     parser.add_argument("--mlp-learning-rate", type=float, default=0.001)
     parser.add_argument("--mlp-weight-decay", type=float, default=0.001)
@@ -178,6 +205,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mlp-validation-fraction", type=float, default=0.15)
     parser.add_argument("--mlp-patience", type=int, default=15)
     parser.add_argument("--mlp-device", default="cpu", choices=("cpu", "cuda"))
+    parser.add_argument("--save-train-preds", action="store_true",
+                        help="Also save per-window in-sample predictions to "
+                             "predictions_train.csv.")
+    parser.add_argument("--no-cyclic", action="store_true",
+                        help="Disable cyclic time features (dow/dos/moy).")
     return parser.parse_args()
 
 
@@ -185,7 +217,8 @@ def main() -> None:
     args = parse_args()
     output_dir = args.output_dir or DEFAULT_OUTPUT_ROOT / f"backtest_{args.model}"
     df = load_table(args.features_db, args.table)
-    df, features = prepare_model_frame(df, args.table, args.min_games_before)
+    df, features = prepare_model_frame(df, args.table, args.min_games_before,
+                                       cyclic=not args.no_cyclic)
     df["game_date"] = pd.to_datetime(df["game_date"])
     df = df.sort_values(["game_date", "game_id"]).reset_index(drop=True)
 
@@ -199,6 +232,7 @@ def main() -> None:
         raise ValueError("No backtest windows found after initial_train_end.")
 
     all_predictions = []
+    all_train_predictions: list[pd.DataFrame] = []
     window_metrics = []
     model_params: dict[str, Any] | None = None
 
@@ -209,8 +243,11 @@ def main() -> None:
         if train_df.empty or test_df.empty:
             continue
 
+        train_probabilities: np.ndarray | None = None
         if args.model == "mlp":
-            probabilities, params = fit_predict_mlp(args, features, train_df, test_df)
+            probabilities, train_probabilities, params = fit_predict_mlp(
+                args, features, train_df, test_df
+            )
         else:
             classifier, scale, params = make_classifier(args)
             model = Pipeline(
@@ -221,6 +258,8 @@ def main() -> None:
             )
             model.fit(train_df[features], train_df[LABEL_COLUMN])
             probabilities = model.predict_proba(test_df[features])[:, 1]
+            if args.save_train_preds:
+                train_probabilities = model.predict_proba(train_df[features])[:, 1]
         model_params = params
         metrics = evaluate(test_df[LABEL_COLUMN], probabilities)
         if args.model == "mlp":
@@ -249,6 +288,14 @@ def main() -> None:
         predictions["window_start"] = window_start.date().isoformat()
         all_predictions.append(predictions)
 
+        if args.save_train_preds and train_probabilities is not None:
+            train_predictions = train_df[
+                ["game_id", "game_date", "home_team_id", "away_team_id", LABEL_COLUMN]
+            ].copy()
+            train_predictions["pred_home_win_prob"] = train_probabilities
+            train_predictions["window_start"] = window_start.date().isoformat()
+            all_train_predictions.append(train_predictions)
+
     predictions_df = pd.concat(all_predictions, ignore_index=True)
     overall_metrics = evaluate(predictions_df[LABEL_COLUMN], predictions_df["pred_home_win_prob"])
 
@@ -270,6 +317,10 @@ def main() -> None:
     )
     pd.DataFrame(window_metrics).to_csv(output_dir / "window_metrics.csv", index=False)
     predictions_df.to_csv(output_dir / "predictions.csv", index=False)
+    if args.save_train_preds and all_train_predictions:
+        pd.concat(all_train_predictions, ignore_index=True).to_csv(
+            output_dir / "predictions_train.csv", index=False
+        )
 
     print(json.dumps(overall_metrics, indent=2))
     print(f"Saved backtest artifacts to {output_dir}")
