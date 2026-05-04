@@ -28,7 +28,6 @@ import torch
 from torch.utils.data import DataLoader
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "models_cme_v5" / "scripts"))
 sys.path.insert(0, str(REPO / "models_cme_v6" / "scripts"))
 
 from cme_v5_common import (  # noqa: E402

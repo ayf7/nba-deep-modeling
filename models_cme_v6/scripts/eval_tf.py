@@ -3,10 +3,9 @@ import argparse, sys, pathlib, glob, torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from model import CmeV6
-from models_cme_v5.scripts.cme_v5_common import PrecomputedDatasetV5, collate_v5
+from cme_v5_common import PrecomputedDatasetV5, collate_v5
 from torch.utils.data import DataLoader
 
 

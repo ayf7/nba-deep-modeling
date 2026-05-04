@@ -16,7 +16,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "models_cme_v5" / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cme_v5_common import PrecomputedDatasetV5, collate_v5, load_precomputed_window_info, load_precomputed_vocab_size

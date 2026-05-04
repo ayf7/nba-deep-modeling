@@ -19,7 +19,6 @@ from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(REPO_ROOT / "models_cme_v5" / "scripts"))
 
 from cme_v5_common import PrecomputedDatasetV5, collate_v5, load_precomputed_window_info, load_precomputed_vocab_size
 from model import CmeV6, CmeV6Config, rotation_loss, box_cum_loss, win_hinge
@@ -105,21 +104,30 @@ def train_one_window(args, window_start, db_path):
     patience_counter = 0
 
     t0 = time.time()
+    epoch = 0
     for epoch in range(1, args.epochs + 1):
         ss_ratio = min(epoch / max(args.ss_warmup, 1), 1.0) * args.ss_max
-        run_epoch_train(model, train_loader, optim, args.device, ss_ratio, args.w_delta)
+        t_ep = time.time()
+        train_loss = run_epoch_train(model, train_loader, optim, args.device, ss_ratio, args.w_delta)
 
         val_acc, val_bce = eval_accuracy(model, val_loader, args.device, autoregressive=True)
+        dt_ep = time.time() - t_ep
 
+        marker = ""
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_epoch = epoch
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             patience_counter = 0
+            marker = " *"
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
+                print(f"  ep{epoch:3d} val_acc={val_acc:.3f} (early stop)", flush=True)
                 break
+
+        if epoch <= 3 or epoch % 5 == 0 or marker:
+            print(f"  ep{epoch:3d} ({dt_ep:.0f}s) loss={train_loss:.4f} val_acc={val_acc:.3f} bce={val_bce:.4f}{marker}", flush=True)
 
     train_time = time.time() - t0
 

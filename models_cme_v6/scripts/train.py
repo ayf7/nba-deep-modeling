@@ -20,8 +20,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-V5_SCRIPTS = REPO_ROOT / "models_cme_v5" / "scripts"
-sys.path.insert(0, str(V5_SCRIPTS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cme_v5_common import (  # noqa: E402
