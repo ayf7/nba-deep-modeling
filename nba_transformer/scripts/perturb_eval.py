@@ -13,8 +13,8 @@ Modes:
 For each mode it reports: bce, acc, L_rot, L_pts, L_win, iou_top5.
 
 Usage:
-  python models_cme_v6/scripts/perturb_eval.py \
-      --ckpt models_cme_v6/artifacts/v6_ckpt_baseline/ckpt_2024-01-01.pt \
+  python nba_transformer/scripts/perturb_eval.py \
+      --ckpt nba_transformer/artifacts/v6_ckpt_baseline/ckpt_2024-01-01.pt \
       --db data/features_v5_precomputed.db \
       --device cuda
 """
@@ -31,7 +31,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "models_cme_v6" / "scripts"))
+sys.path.insert(0, str(REPO / "nba_transformer"))
 
 from cme_v5_common import (  # noqa: E402
     PrecomputedDatasetV5, collate_v5, load_precomputed_vocab_size,

@@ -7,7 +7,7 @@ top-5 lineup per minute against GT rotation. Reports:
   - How wrong predictions affect downstream pts computation
 """
 import argparse, sys, pathlib, torch, numpy as np
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from model import CmeV6, CmeV6Config
 

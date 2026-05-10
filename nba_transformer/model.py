@@ -505,8 +505,8 @@ class CmeV6(nn.Module):
             if t + 1 < S:
                 scores_h = rot_logits_t[:, :Lh].masked_fill(~home_mask, float("-inf"))
                 scores_a = rot_logits_t[:, Lh:].masked_fill(~away_mask, float("-inf"))
-                top_h = scores_h.topk(5, dim=-1).indices
-                top_a = scores_a.topk(5, dim=-1).indices
+                top_h = scores_h.topk(min(5, scores_h.size(-1)), dim=-1).indices
+                top_a = scores_a.topk(min(5, scores_a.size(-1)), dim=-1).indices
                 one_hot = torch.zeros(B, L, device=dev)
                 one_hot.scatter_(1, top_h, 1.0)
                 one_hot.scatter_(1, Lh + top_a, 1.0)

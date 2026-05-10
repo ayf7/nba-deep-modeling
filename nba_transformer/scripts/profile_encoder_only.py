@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cme_v5_common import PrecomputedDatasetV5, collate_v5, load_precomputed_window_info, load_precomputed_vocab_size
 from encoder_only import EncoderOnlyModel, EncoderOnlyConfig, win_hinge, win_bce

@@ -2,7 +2,7 @@
 import argparse, sys, pathlib, glob, torch
 import torch.nn.functional as F
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from model import CmeV6
 from cme_v5_common import PrecomputedDatasetV5, collate_v5

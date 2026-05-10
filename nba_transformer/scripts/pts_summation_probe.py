@@ -13,8 +13,8 @@ Reports per-mode: mean home_pts/away_pts/diff, std, paired-mode correlation,
 and paired mean absolute difference vs normal_tf.
 
 Usage:
-  python models_cme_v6/scripts/pts_summation_probe.py \
-      --ckpt models_cme_v6/artifacts/v6_ckpt_baseline/ckpt_2024-01-01.pt \
+  python nba_transformer/scripts/pts_summation_probe.py \
+      --ckpt nba_transformer/artifacts/v6_ckpt_baseline/ckpt_2024-01-01.pt \
       --db data/features_v5_precomputed.db --device cuda
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ import torch
 from torch.utils.data import DataLoader
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "models_cme_v6" / "scripts"))
+sys.path.insert(0, str(REPO / "nba_transformer"))
 
 from cme_v5_common import (  # noqa: E402
     PrecomputedDatasetV5, collate_v5,

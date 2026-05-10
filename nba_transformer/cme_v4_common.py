@@ -1,20 +1,25 @@
-"""CME-v5 data layer (v4 + per-minute rotation curve targets).
+"""CME-v4 data layer (bottom-up: per-player minutes + pace + pair stats).
 
-Self-contained — re-exports everything downstream code needs.  Pulls:
+Self-contained — does NOT import from cme_v3_common. Pulls only:
   - man_xfmr_common for base utilities (Vocab, TeamVocab, build_full_lineup,
     loaders, tabular/player-form helpers)
   - cme_v2_common for shared PAIR/PLAYER/BOX constants and the matchup/box
     label dataclasses (PairLabelV2, PlayerBoxLabel)
-  - cme_v4_common for play-decision loading, box-minutes-and-pace loading,
-    career-year helpers
 
-v5 differs from v4 by:
-  1. 48-dim per-minute on-court presence vectors from
-     `data/artifacts/cme_v5_features.sqlite` as supervision targets for
-     the rotation head.
-  2. Regulation-end scores (also from cme_v5_features.sqlite) replace
-     final scores in team_box point targets, giving a clean target for
-     non-OT game state prediction.
+v4 differs from v3 by:
+  1. Hard play/no-play decisions from data/artifacts/player_decisions.sqlite
+     replace the soft injury-report calibrated probability. Players who did
+     not play are DROPPED from the input sequence entirely — no positional
+     embedding, so the input is a set and removing a slot doesn't disturb
+     others' representations. Attention runs over actives only; the padding
+     mask IS the actives mask.
+  2. Per-player minutes target supervises observed zeros directly, fixing
+     alpha-leak (finding #4).
+  3. Per-team possessions target supervises the pace head.
+
+Both v4 targets come from `data/artifacts/player_game_stats.sqlite` — exact
+PBP-derived per-game per-player stats. Per-team poss uses the NBA standard:
+`FGA + 0.44·FTA - OREB + TOV`.
 """
 
 from __future__ import annotations
@@ -28,11 +33,10 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-V5_MAN_SCRIPTS = Path(__file__).resolve().parents[2] / "models_man_xfmr" / "scripts"
-sys.path.insert(0, str(V5_MAN_SCRIPTS))
-V2_SCRIPTS = Path(__file__).resolve().parents[2] / "models_cme_v2" / "scripts"
+V5_SCRIPTS = Path(__file__).resolve().parents[1] / "models_man_xfmr" / "scripts"
+sys.path.insert(0, str(V5_SCRIPTS))
+V2_SCRIPTS = Path(__file__).resolve().parents[1] / "models_cme_v2" / "scripts"
 sys.path.insert(0, str(V2_SCRIPTS))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from man_xfmr_common import (  # noqa: E402
     DEFAULT_CORE_DB,
@@ -95,22 +99,6 @@ from cme_v2_common import (  # noqa: E402
     load_player_game_stats,
 )
 
-from cme_v4_common import (  # noqa: E402
-    BoxMinutesPace,
-    MAX_CAREER_YEAR,
-    MIN_TEAM_SUPERVISION_MINUTES,
-    TEAM_BASE_POSSESSIONS,
-    TEAM_TOTAL_MINUTES,
-    _compute_player_minutes_and_pace,
-    career_year_to_idx,
-    load_box_minutes_and_pace,
-    load_play_decisions,
-    load_player_debut,
-    load_player_first_season,
-)
-
-
-# ----------------------------- constants ----------------------------- #
 
 DEFAULT_PLAYER_GAME_STATS_DB = (
     Path(__file__).resolve().parents[2] / "data" / "artifacts" / "player_game_stats.sqlite"
@@ -121,120 +109,208 @@ DEFAULT_PLAYER_DECISIONS_DB = (
 DEFAULT_PLAYER_DEBUT_DB = (
     Path(__file__).resolve().parents[2] / "data" / "artifacts" / "player_debut.sqlite"
 )
-DEFAULT_V5_FEATURES_DB = (
-    Path(__file__).resolve().parents[2] / "data" / "artifacts" / "cme_v5_features.sqlite"
-)
 
-N_SEGMENTS = 48
+# 5 players × 48 min = 240 minutes per team per regulation. Used as the scale
+# in the minutes loss (and as a sanity threshold for supervision validity).
+TEAM_TOTAL_MINUTES = 240.0
+TEAM_BASE_POSSESSIONS = 100.0
+MIN_TEAM_SUPERVISION_MINUTES = 200.0
 
-_MINUTE_COLS = [f"m{i:02d}" for i in range(N_SEGMENTS)]
+# Max number of career-year buckets the time-position embedding supports.
+# career_year = game_season - nba_debut_season (clamped to [0, MAX_CAREER_YEAR-1]).
+# With true NBA debut years (via player_debut.sqlite), LeBron is at year ~22
+# today; sized to 25 to cover that with headroom. Embedding table has size
+# MAX_CAREER_YEAR + 1 with idx 0 reserved for padding; real career years
+# 0..MAX_CAREER_YEAR-1 map to idx 1..MAX_CAREER_YEAR.
+MAX_CAREER_YEAR = 25
 
 
-# ----------------------------- v5 data loaders ----------------------------- #
+def career_year_to_idx(year: int) -> int:
+    """0-indexed career year → embedding index. 0 reserved for padding."""
+    if year < 0:
+        year = 0
+    if year > MAX_CAREER_YEAR - 1:
+        year = MAX_CAREER_YEAR - 1
+    return year + 1
 
 
-def load_minute_presence(
-    v5_features_db: Path,
-    game_ids: list[str] | None = None,
-) -> dict[tuple[str, str], tuple[float, ...]]:
-    """Load per-minute presence vectors.
+def load_player_first_season(player_game_stats_db: Path) -> dict[str, int]:
+    """{player_id: min(season)} across all rows in player_game_stats.
 
-    Returns {(game_id, player_id): tuple of 48 floats}
+    DB-relative "first season" — equal to the player's NBA debut only when our
+    data window covers their debut. Prefer `load_player_debut` for new runs;
+    this is kept as the fallback path and for back-compat with older configs.
     """
-    out: dict[tuple[str, str], tuple[float, ...]] = {}
-    cols = ", ".join(_MINUTE_COLS)
-    with sqlite3.connect(v5_features_db) as conn:
+    out: dict[str, int] = {}
+    with sqlite3.connect(player_game_stats_db) as conn:
+        for pid, first in conn.execute(
+            "SELECT player_id, MIN(season) FROM player_game_stats GROUP BY player_id"
+        ):
+            out[str(pid)] = int(first)
+    return out
+
+
+def load_player_debut(
+    player_debut_db: Path | None,
+    fallback_player_game_stats_db: Path,
+) -> dict[str, int]:
+    """{player_id: true NBA debut season} via `player_debut.sqlite`, with
+    `MIN(season) FROM player_game_stats` as a fallback for pids missing from
+    the debut table (e.g., very recent two-way contracts / G-League call-ups
+    not yet pulled).
+
+    The returned map is invariant to which subset of seasons we train on, so
+    for a fixed real (player, game) the resulting `career_year` is stable
+    across data-window choices.
+    """
+    out: dict[str, int] = {}
+    if player_debut_db is not None and Path(player_debut_db).exists():
+        with sqlite3.connect(player_debut_db) as conn:
+            for pid, from_year in conn.execute(
+                "SELECT player_id, from_year FROM player_debut WHERE from_year IS NOT NULL"
+            ):
+                out[str(pid)] = int(from_year)
+    fallback = load_player_first_season(fallback_player_game_stats_db)
+    for pid, first in fallback.items():
+        out.setdefault(pid, first)
+    return out
+
+
+# ----------------------------- decisions ----------------------------- #
+
+
+def load_play_decisions(
+    decisions_db: Path,
+    game_ids: list[str] | None = None,
+) -> dict[str, dict[str, int]]:
+    """{game_id: {player_id: played ∈ {0,1}}} from hoopR's player_box.
+
+    Built upstream by data/scripts/build_player_decisions.py. `played=0`
+    covers both DNP-CD and Inactive — anyone whose ESPN row had
+    did_not_play=1. Used to filter the lineup so only players who actually
+    appeared get tokens.
+    """
+    out: dict[str, dict[str, int]] = {}
+    with sqlite3.connect(decisions_db) as conn:
         if game_ids:
             chunk = 500
             q = (
-                f"SELECT game_id, player_id, {cols} FROM player_minute_presence "
+                "SELECT game_id, player_id, played FROM game_player_decisions "
                 "WHERE game_id IN ({ph})"
             )
             for start in range(0, len(game_ids), chunk):
-                ids = game_ids[start : start + chunk]
+                ids = game_ids[start:start + chunk]
                 ph = ",".join("?" * len(ids))
-                for row in conn.execute(q.format(ph=ph), ids):
-                    gid = str(row[0])
-                    pid = str(row[1])
-                    out[(gid, pid)] = tuple(float(v) for v in row[2:])
+                for gid, pid, played in conn.execute(q.format(ph=ph), ids):
+                    out.setdefault(str(gid), {})[str(pid)] = int(played)
         else:
-            q = f"SELECT game_id, player_id, {cols} FROM player_minute_presence"
-            for row in conn.execute(q):
-                gid = str(row[0])
-                pid = str(row[1])
-                out[(gid, pid)] = tuple(float(v) for v in row[2:])
-    return out
-
-
-def load_regulation_scores(
-    v5_features_db: Path,
-    game_ids: list[str] | None = None,
-) -> dict[str, tuple[int, int, bool]]:
-    """Load regulation-end scores.
-
-    Returns {game_id: (home_score_reg, away_score_reg, is_overtime)}
-    """
-    out: dict[str, tuple[int, int, bool]] = {}
-    with sqlite3.connect(v5_features_db) as conn:
-        if game_ids:
-            chunk = 500
-            q = (
-                "SELECT game_id, home_score_regulation, away_score_regulation, is_overtime "
-                "FROM game_regulation_info WHERE game_id IN ({ph})"
-            )
-            for start in range(0, len(game_ids), chunk):
-                ids = game_ids[start : start + chunk]
-                ph = ",".join("?" * len(ids))
-                for gid, h_score, a_score, ot in conn.execute(q.format(ph=ph), ids):
-                    out[str(gid)] = (int(h_score), int(a_score), bool(ot))
-        else:
-            for gid, h_score, a_score, ot in conn.execute(
-                "SELECT game_id, home_score_regulation, away_score_regulation, is_overtime "
-                "FROM game_regulation_info"
+            for gid, pid, played in conn.execute(
+                "SELECT game_id, player_id, played FROM game_player_decisions"
             ):
-                out[str(gid)] = (int(h_score), int(a_score), bool(ot))
+                out.setdefault(str(gid), {})[str(pid)] = int(played)
     return out
+
+
+# ----------------------------- minutes / pace ----------------------------- #
+
+
+@dataclass(frozen=True)
+class BoxMinutesPace:
+    """Per-game per-player minutes + per-team possessions, from PBP box scores."""
+    player_seconds: dict[tuple[str, str], float]  # (team_id, player_id) -> seconds
+    team_possessions: dict[str, float]            # team_id -> possessions
+
+
+def load_box_minutes_and_pace(
+    player_game_stats_db: Path, game_ids: list[str]
+) -> dict[str, BoxMinutesPace]:
+    """Read exact box-score minutes + team possessions from `player_game_stats.sqlite`.
+
+    Team possessions use the standard NBA formula
+    `FGA + 0.44·FTA - OREB + TOV` summed across the team's players.
+    """
+    if not game_ids:
+        return {}
+
+    per_gid_secs: dict[str, dict[tuple[str, str], float]] = {}
+    per_gid_team_acc: dict[str, dict[str, list[float]]] = {}
+    chunk = 500
+    query_template = """
+        SELECT game_id, team_id, player_id, seconds_played, fga, fta, oreb, tov
+        FROM player_game_stats
+        WHERE game_id IN ({placeholders})
+    """
+    with sqlite3.connect(player_game_stats_db) as conn:
+        for start in range(0, len(game_ids), chunk):
+            ids = game_ids[start : start + chunk]
+            placeholders = ",".join("?" * len(ids))
+            for row in conn.execute(query_template.format(placeholders=placeholders), ids):
+                gid, team, pid, secs, fga, fta, oreb, tov = row
+                gid, team, pid = str(gid), str(team), str(pid)
+                per_gid_secs.setdefault(gid, {})[(team, pid)] = float(secs or 0.0)
+                acc = per_gid_team_acc.setdefault(gid, {}).setdefault(team, [0.0, 0.0, 0.0, 0.0])
+                acc[0] += float(fga or 0)
+                acc[1] += float(fta or 0)
+                acc[2] += float(oreb or 0)
+                acc[3] += float(tov or 0)
+
+    out: dict[str, BoxMinutesPace] = {}
+    for gid, team_acc in per_gid_team_acc.items():
+        team_poss = {
+            t: max(0.0, fga + 0.44 * fta - oreb + tov)
+            for t, (fga, fta, oreb, tov) in team_acc.items()
+        }
+        out[gid] = BoxMinutesPace(
+            player_seconds=per_gid_secs.get(gid, {}),
+            team_possessions=team_poss,
+        )
+    return out
+
+
+def _compute_player_minutes_and_pace(
+    box: BoxMinutesPace | None,
+    *,
+    home_team: str,
+    away_team: str,
+    home_pid_to_slot: dict[str, int],
+    away_pid_to_slot: dict[str, int],
+    n_home: int,
+    n_away: int,
+) -> tuple[
+    tuple[float, ...], tuple[float, ...],
+    float, float,
+    bool, bool,
+]:
+    home_min = [0.0] * n_home
+    away_min = [0.0] * n_away
+    if box is not None:
+        for (team, pid), sec in box.player_seconds.items():
+            if team == home_team:
+                slot = home_pid_to_slot.get(pid)
+                if slot is not None:
+                    home_min[slot] = sec / 60.0
+            elif team == away_team:
+                slot = away_pid_to_slot.get(pid)
+                if slot is not None:
+                    away_min[slot] = sec / 60.0
+    pace_home = (box.team_possessions.get(home_team, TEAM_BASE_POSSESSIONS)
+                 if box is not None else TEAM_BASE_POSSESSIONS)
+    pace_away = (box.team_possessions.get(away_team, TEAM_BASE_POSSESSIONS)
+                 if box is not None else TEAM_BASE_POSSESSIONS)
+    valid_h = sum(home_min) >= MIN_TEAM_SUPERVISION_MINUTES
+    valid_a = sum(away_min) >= MIN_TEAM_SUPERVISION_MINUTES
+    return tuple(home_min), tuple(away_min), pace_home, pace_away, valid_h, valid_a
 
 
 # ----------------------------- record + builder ----------------------------- #
 
-_ZERO_PRESENCE = tuple(0.0 for _ in range(N_SEGMENTS))
-
-
-def _clip_rest(value) -> float:
-    if value is None or pd.isna(value):
-        return REST_DAYS_CLIP
-    v = float(value)
-    if v < 0:
-        return 0.0
-    return min(v, REST_DAYS_CLIP)
-
-
-def _build_box_label(
-    matchup_rows_for_player: list[tuple[float, ...]],
-    player_only_stats: tuple[float, float, float, float, float, float] | None,
-) -> tuple[float, ...]:
-    fgm = sum(r[_PAIR_FGM_IDX] for r in matchup_rows_for_player)
-    fga = sum(r[_PAIR_FGA_IDX] for r in matchup_rows_for_player)
-    p3m = sum(r[_PAIR_3PM_IDX] for r in matchup_rows_for_player)
-    p3a = sum(r[_PAIR_3PA_IDX] for r in matchup_rows_for_player)
-    ast = sum(r[_PAIR_AST_IDX] for r in matchup_rows_for_player)
-    tov = sum(r[_PAIR_TOV_IDX] for r in matchup_rows_for_player)
-    blk = sum(r[_PAIR_BLK_IDX] for r in matchup_rows_for_player)
-    if player_only_stats is None:
-        ftm = fta = oreb = dreb = stl = pf = 0.0
-    else:
-        ftm, fta, oreb, dreb, stl, pf = player_only_stats
-    pts = 2.0 * fgm + p3m + ftm
-    return (pts, fgm, fga, p3m, p3a, ftm, fta, ast, tov, blk, oreb, dreb, stl, pf)
-
 
 @dataclass(frozen=True)
-class GameRecordV5:
+class GameRecordV4:
     """Per-game record. Lineups are pre-filtered to players who played.
 
-    Extends v4 with per-player rotation curve targets (48-dim on-court
-    presence vectors) and uses regulation scores for team_box points.
+    No `play_prob` fields — the injury-report soft probability has been
+    retired in v4. The DNP signal enters via lineup filtering only.
     """
     game_id: str
     game_date: pd.Timestamp
@@ -266,17 +342,40 @@ class GameRecordV5:
     away_pace_actual: float
     home_minutes_valid: bool
     away_minutes_valid: bool
-    # v5: per-player 48-dim rotation curve targets.
-    home_rotation_target: tuple[tuple[float, ...], ...]
-    away_rotation_target: tuple[tuple[float, ...], ...]
-    home_rotation_valid: bool
-    away_rotation_valid: bool
     home_dec_odds: float = 1.0
     away_dec_odds: float = 1.0
     has_odds: bool = False
 
 
-def build_records_v5(
+def _clip_rest(value) -> float:
+    if value is None or pd.isna(value):
+        return REST_DAYS_CLIP
+    v = float(value)
+    if v < 0:
+        return 0.0
+    return min(v, REST_DAYS_CLIP)
+
+
+def _build_box_label(
+    matchup_rows_for_player: list[tuple[float, ...]],
+    player_only_stats: tuple[float, float, float, float, float, float] | None,
+) -> tuple[float, ...]:
+    fgm = sum(r[_PAIR_FGM_IDX] for r in matchup_rows_for_player)
+    fga = sum(r[_PAIR_FGA_IDX] for r in matchup_rows_for_player)
+    p3m = sum(r[_PAIR_3PM_IDX] for r in matchup_rows_for_player)
+    p3a = sum(r[_PAIR_3PA_IDX] for r in matchup_rows_for_player)
+    ast = sum(r[_PAIR_AST_IDX] for r in matchup_rows_for_player)
+    tov = sum(r[_PAIR_TOV_IDX] for r in matchup_rows_for_player)
+    blk = sum(r[_PAIR_BLK_IDX] for r in matchup_rows_for_player)
+    if player_only_stats is None:
+        ftm = fta = oreb = dreb = stl = pf = 0.0
+    else:
+        ftm, fta, oreb, dreb, stl, pf = player_only_stats
+    pts = 2.0 * fgm + p3m + ftm
+    return (pts, fgm, fga, p3m, p3a, ftm, fta, ast, tov, blk, oreb, dreb, stl, pf)
+
+
+def build_records_v4(
     games: pd.DataFrame,
     histories: dict[str, list[TeamGameExposure]],
     *,
@@ -287,8 +386,6 @@ def build_records_v5(
     matchup_rows: dict[str, list[tuple[str, str, str, tuple[float, ...]]]] | None,
     box_minutes_pace: dict[str, BoxMinutesPace] | None,
     player_game_stats: dict[tuple[str, str], tuple[float, ...]] | None,
-    minute_presence: dict[tuple[str, str], tuple[float, ...]] | None,
-    regulation_scores: dict[str, tuple[int, int, bool]] | None,
     lookback_games: int,
     decay: float,
     tabular_stats: TabularStats,
@@ -298,15 +395,17 @@ def build_records_v5(
     player_form_lookback: int = DEFAULT_PLAYER_FORM_LOOKBACK,
     player_form_decay: float = DEFAULT_PLAYER_FORM_DECAY,
     game_odds: dict[str, tuple[float, float]] | None = None,
-) -> list[GameRecordV5]:
-    """Build per-game v5 records.
+) -> list[GameRecordV4]:
+    """Build per-game v4 records.
 
-    Same as v4's build_records_v4 but additionally:
-      - Looks up per-player 48-dim presence vectors from minute_presence
-      - Uses regulation scores for team_box point targets when available
+    Lineup for each team = `build_full_lineup(...)` (top-N by recent exposure)
+    filtered to player_ids with played=1 in `play_decisions[game_id]`. Games
+    missing from `play_decisions` are skipped. Players in the full lineup
+    whose decision is missing are treated as DNP (no row in player_box →
+    likely not on the active roster) and dropped.
     """
     raw_tabular = games[list(TABULAR_FEATURE_COLUMNS)].to_numpy(dtype="float64")
-    out: list[GameRecordV5] = []
+    out: list[GameRecordV4] = []
     for row_i, game in enumerate(games.itertuples(index=False)):
         gid = str(game.game_id)
         if gid not in game_scores:
@@ -336,7 +435,9 @@ def build_records_v5(
         home_pid_to_slot = {p: i for i, p in enumerate(home_pids)}
         away_pid_to_slot = {p: i for i, p in enumerate(away_pids)}
 
-        # Per-(player, game) career-year embedding index.
+        # Per-(player, game) career-year embedding index. Falls back to
+        # idx=0 (padding bucket) if first_season is unknown for the player —
+        # the model treats this as "no time-position info" via padding_idx.
         if player_first_season is not None:
             game_season = int(getattr(game, "season"))
             home_career_year_idx = tuple(
@@ -393,47 +494,19 @@ def build_records_v5(
                 for k in range(K_BOX):
                     team_box_away[k] += box[k]
 
-        # Team box point targets: prefer regulation scores when available.
         home_score, away_score = game_scores[gid]
-        if regulation_scores is not None and gid in regulation_scores:
-            reg_home, reg_away, _is_ot = regulation_scores[gid]
-            team_box_home[BOX_INDEX["pts"]] = float(reg_home)
-            team_box_away[BOX_INDEX["pts"]] = float(reg_away)
-        else:
-            team_box_home[BOX_INDEX["pts"]] = float(home_score)
-            team_box_away[BOX_INDEX["pts"]] = float(away_score)
-
+        team_box_home[BOX_INDEX["pts"]] = float(home_score)
+        team_box_away[BOX_INDEX["pts"]] = float(away_score)
         tab = transform_tabular_row(raw_tabular[row_i], tabular_stats)
 
-        box_mp = box_minutes_pace.get(gid) if box_minutes_pace else None
+        box = box_minutes_pace.get(gid) if box_minutes_pace else None
         (h_min, a_min, p_home, p_away, valid_h, valid_a) = _compute_player_minutes_and_pace(
-            box_mp,
+            box,
             home_team=home_team, away_team=away_team,
             home_pid_to_slot=home_pid_to_slot,
             away_pid_to_slot=away_pid_to_slot,
             n_home=len(home_pids), n_away=len(away_pids),
         )
-
-        # v5: rotation curve targets.
-        if minute_presence is not None:
-            home_rot = tuple(
-                minute_presence.get((gid, pid), _ZERO_PRESENCE) for pid in home_pids
-            )
-            away_rot = tuple(
-                minute_presence.get((gid, pid), _ZERO_PRESENCE) for pid in away_pids
-            )
-            # Valid when at least one player on the team has non-zero presence data.
-            home_rot_valid = any(
-                (gid, pid) in minute_presence for pid in home_pids
-            )
-            away_rot_valid = any(
-                (gid, pid) in minute_presence for pid in away_pids
-            )
-        else:
-            home_rot = tuple(_ZERO_PRESENCE for _ in home_pids)
-            away_rot = tuple(_ZERO_PRESENCE for _ in away_pids)
-            home_rot_valid = False
-            away_rot_valid = False
 
         if player_histories is not None and player_form_stats is not None:
             home_stats = tuple(
@@ -462,7 +535,7 @@ def build_records_v5(
 
         h_dec, a_dec = (game_odds.get(gid) if game_odds else None) or (1.0, 1.0)
         has_odds = bool(game_odds and gid in game_odds)
-        out.append(GameRecordV5(
+        out.append(GameRecordV4(
             game_id=gid,
             game_date=gd,
             label=int(getattr(game, LABEL_COLUMN)),
@@ -490,10 +563,6 @@ def build_records_v5(
             away_pace_actual=p_away,
             home_minutes_valid=valid_h,
             away_minutes_valid=valid_a,
-            home_rotation_target=home_rot,
-            away_rotation_target=away_rot,
-            home_rotation_valid=home_rot_valid,
-            away_rotation_valid=away_rot_valid,
             home_dec_odds=h_dec,
             away_dec_odds=a_dec,
             has_odds=has_odds,
@@ -501,7 +570,7 @@ def build_records_v5(
     return out
 
 
-def build_vocab_from_records_v5(
+def build_vocab_from_records_v4(
     games_train: pd.DataFrame,
     histories: dict[str, list[TeamGameExposure]],
     matchup_rows_train: dict[str, list[tuple[str, str, str, tuple[float, ...]]]],
@@ -536,8 +605,8 @@ def build_vocab_from_records_v5(
 # ----------------------------- dataset + collate ----------------------------- #
 
 
-class GameDatasetV5(Dataset):
-    def __init__(self, records: list[GameRecordV5]) -> None:
+class GameDatasetV4(Dataset):
+    def __init__(self, records: list[GameRecordV4]) -> None:
         self.records = records
 
     def __len__(self) -> int:
@@ -575,10 +644,6 @@ class GameDatasetV5(Dataset):
             sup_pl_slot = torch.zeros(0, dtype=torch.long)
             sup_pl_y = torch.zeros(0, K_BOX, dtype=torch.float32)
 
-        # v5: rotation curve targets.
-        home_rotation_target = torch.tensor(r.home_rotation_target, dtype=torch.float32)
-        away_rotation_target = torch.tensor(r.away_rotation_target, dtype=torch.float32)
-
         return {
             "home_idx": torch.tensor(r.home_player_idx, dtype=torch.long),
             "away_idx": torch.tensor(r.away_player_idx, dtype=torch.long),
@@ -611,15 +676,11 @@ class GameDatasetV5(Dataset):
             "away_pace_actual": torch.tensor(r.away_pace_actual, dtype=torch.float32),
             "home_minutes_valid": torch.tensor(float(r.home_minutes_valid), dtype=torch.float32),
             "away_minutes_valid": torch.tensor(float(r.away_minutes_valid), dtype=torch.float32),
-            "home_rotation_target": home_rotation_target,
-            "away_rotation_target": away_rotation_target,
-            "home_rotation_valid": torch.tensor(float(r.home_rotation_valid), dtype=torch.float32),
-            "away_rotation_valid": torch.tensor(float(r.away_rotation_valid), dtype=torch.float32),
         }
 
 
-def collate_v5(batch: list[dict]) -> dict:
-    """Pad rosters, concat flat sup_* tensors, pad rotation targets."""
+def collate_v4(batch: list[dict]) -> dict:
+    """Pad rosters, concat flat sup_* tensors. No prob fields."""
     B = len(batch)
     L_h = max(b["home_idx"].numel() for b in batch)
     L_a = max(b["away_idx"].numel() for b in batch)
@@ -635,12 +696,6 @@ def collate_v5(batch: list[dict]) -> dict:
     away_stats = torch.zeros(B, L_a, D_stats, dtype=torch.float32)
     home_minutes = torch.zeros(B, L_h, dtype=torch.float32)
     away_minutes = torch.zeros(B, L_a, dtype=torch.float32)
-    home_rotation = torch.zeros(B, L_h, N_SEGMENTS, dtype=torch.float32)
-    away_rotation = torch.zeros(B, L_a, N_SEGMENTS, dtype=torch.float32)
-    has_minute_box = "home_minute_box" in batch[0]
-    if has_minute_box:
-        home_minute_box = torch.zeros(B, L_h, N_SEGMENTS, K_BOX, dtype=torch.float32)
-        away_minute_box = torch.zeros(B, L_a, N_SEGMENTS, K_BOX, dtype=torch.float32)
 
     for b, item in enumerate(batch):
         n_h = item["home_idx"].numel()
@@ -656,13 +711,6 @@ def collate_v5(batch: list[dict]) -> dict:
             away_stats[b, :n_a] = item["away_stats"]
         home_minutes[b, :n_h] = item["home_minutes_actual"]
         away_minutes[b, :n_a] = item["away_minutes_actual"]
-        home_rotation[b, :n_h] = item["home_rotation_target"]
-        away_rotation[b, :n_a] = item["away_rotation_target"]
-        if has_minute_box:
-            n_hm = item["home_minute_box"].size(0)
-            n_am = item["away_minute_box"].size(0)
-            home_minute_box[b, :n_hm] = item["home_minute_box"]
-            away_minute_box[b, :n_am] = item["away_minute_box"]
 
     out = {
         "home_idx": home_idx,
@@ -691,14 +739,7 @@ def collate_v5(batch: list[dict]) -> dict:
         "away_pace_actual": torch.stack([b["away_pace_actual"] for b in batch]),
         "home_minutes_valid": torch.stack([b["home_minutes_valid"] for b in batch]),
         "away_minutes_valid": torch.stack([b["away_minutes_valid"] for b in batch]),
-        "home_rotation_target": home_rotation,
-        "away_rotation_target": away_rotation,
-        "home_rotation_valid": torch.stack([b["home_rotation_valid"] for b in batch]),
-        "away_rotation_valid": torch.stack([b["away_rotation_valid"] for b in batch]),
     }
-    if has_minute_box:
-        out["home_minute_box"] = home_minute_box
-        out["away_minute_box"] = away_minute_box
 
     pair_game = torch.cat([
         torch.full_like(b["sup_pair_side"], i) for i, b in enumerate(batch)
@@ -724,254 +765,6 @@ def collate_v5(batch: list[dict]) -> dict:
     return out
 
 
-# ----------------------------- fast precomputed loader ----------------------------- #
-
-import struct as _struct
-
-
-def _unpack_floats(blob: bytes) -> tuple[float, ...]:
-    n = len(blob) // 4
-    return _struct.unpack(f"{n}f", blob)
-
-
-class PrecomputedDatasetV5(Dataset):
-    """Loads pre-computed features from SQLite (built by build_features_db.py).
-
-    Returns items in the same dict format as GameDatasetV5.__getitem__,
-    so collate_v5 works unchanged.
-    """
-
-    def __init__(self, db_path: str | Path, window_start: str, split: str,
-                 regular_season_only: bool = False) -> None:
-        import numpy as np
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-
-        # Load games for this window+split — decode blobs once
-        # Regular-season-only filter: NBA game IDs encode game type in positions 4-5
-        # ("00" = regular season, "01" = playoffs).
-        if regular_season_only:
-            game_rows = conn.execute(
-                "SELECT * FROM games WHERE window_start=? AND split=? "
-                "AND substr(game_id, 4, 2)='00'",
-                (window_start, split),
-            ).fetchall()
-        else:
-            game_rows = conn.execute(
-                "SELECT * FROM games WHERE window_start=? AND split=?",
-                (window_start, split),
-            ).fetchall()
-        self._game_ids = [row["game_id"] for row in game_rows]
-        self._games: dict[str, dict] = {}
-        for row in game_rows:
-            self._games[row["game_id"]] = {
-                **{k: row[k] for k in ("game_id", "label", "margin",
-                    "home_team_idx", "away_team_idx", "home_rest", "away_rest",
-                    "home_dec_odds", "away_dec_odds", "has_odds",
-                    "home_pace_actual", "away_pace_actual",
-                    "home_minutes_valid", "away_minutes_valid",
-                    "home_rotation_valid", "away_rotation_valid")},
-                "tabular": torch.frombuffer(bytearray(row["tabular"]), dtype=torch.float32).clone(),
-                "team_box_home": torch.frombuffer(bytearray(row["team_box_home"]), dtype=torch.float32).clone(),
-                "team_box_away": torch.frombuffer(bytearray(row["team_box_away"]), dtype=torch.float32).clone(),
-            }
-
-        # Load all players — decode blobs once
-        gid_placeholders = ",".join("?" * len(self._game_ids))
-        player_rows = conn.execute(
-            f"SELECT * FROM players WHERE window_start=? AND game_id IN ({gid_placeholders})",
-            [window_start] + self._game_ids,
-        ).fetchall()
-        self._players: dict[str, list] = {}
-        for row in player_rows:
-            fs = row["form_stats"]
-            rt = row["rotation_target"]
-            rec = {
-                "side": row["side"], "slot": row["slot"],
-                "player_idx": row["player_idx"],
-                "career_year_idx": row["career_year_idx"],
-                "minutes_actual": row["minutes_actual"],
-                "form_stats": torch.frombuffer(bytearray(fs), dtype=torch.float32).clone() if fs else None,
-                "rotation_target": torch.frombuffer(bytearray(rt), dtype=torch.float32).clone(),
-            }
-            self._players.setdefault(row["game_id"], []).append(rec)
-
-        # Load player labels — decode blobs once
-        label_rows = conn.execute(
-            f"SELECT * FROM player_labels WHERE window_start=? AND game_id IN ({gid_placeholders})",
-            [window_start] + self._game_ids,
-        ).fetchall()
-        self._player_labels: dict[str, list] = {}
-        for row in label_rows:
-            rec = {
-                "side": row["side"], "slot": row["slot"],
-                "targets": torch.frombuffer(bytearray(row["targets"]), dtype=torch.float32).clone(),
-            }
-            self._player_labels.setdefault(row["game_id"], []).append(rec)
-
-        # Load pairs — decode blobs once
-        pair_rows = conn.execute(
-            f"SELECT * FROM pairs WHERE window_start=? AND game_id IN ({gid_placeholders})",
-            [window_start] + self._game_ids,
-        ).fetchall()
-        self._pairs: dict[str, list] = {}
-        for row in pair_rows:
-            rec = {
-                "side": row["side"], "off_slot": row["off_slot"], "def_slot": row["def_slot"],
-                "targets": torch.frombuffer(bytearray(row["targets"]), dtype=torch.float32).clone(),
-            }
-            self._pairs.setdefault(row["game_id"], []).append(rec)
-
-        # Load per-minute box stats — decode blobs once
-        self._minute_box: dict[str, list] = {}
-        try:
-            mb_rows = conn.execute(
-                f"SELECT * FROM player_minute_box WHERE window_start=? AND game_id IN ({gid_placeholders})",
-                [window_start] + self._game_ids,
-            ).fetchall()
-            N_MIN, N_BOX = 48, K_BOX
-            for row in mb_rows:
-                rec = {
-                    "side": row["side"], "slot": row["slot"],
-                    "stats": torch.frombuffer(bytearray(row["stats_blob"]), dtype=torch.float32).clone().view(N_MIN, N_BOX),
-                }
-                self._minute_box.setdefault(row["game_id"], []).append(rec)
-        except sqlite3.OperationalError:
-            pass
-
-        conn.close()
-
-    def __len__(self) -> int:
-        return len(self._game_ids)
-
-    def __getitem__(self, idx: int) -> dict:
-        gid = self._game_ids[idx]
-        g = self._games[gid]
-
-        # Sort players by (side, slot)
-        players = sorted(self._players.get(gid, []), key=lambda r: (r["side"], r["slot"]))
-        home_players = [p for p in players if p["side"] == 0]
-        away_players = [p for p in players if p["side"] == 1]
-        L_h = len(home_players)
-        L_a = len(away_players)
-
-        home_idx = torch.tensor([p["player_idx"] for p in home_players], dtype=torch.long)
-        away_idx = torch.tensor([p["player_idx"] for p in away_players], dtype=torch.long)
-        home_career = torch.tensor([p["career_year_idx"] for p in home_players], dtype=torch.long)
-        away_career = torch.tensor([p["career_year_idx"] for p in away_players], dtype=torch.long)
-
-        if home_players and home_players[0]["form_stats"] is not None:
-            home_stats = torch.stack([p["form_stats"] for p in home_players])
-            away_stats = torch.stack([p["form_stats"] for p in away_players])
-        else:
-            home_stats = torch.zeros(L_h, 0, dtype=torch.float32)
-            away_stats = torch.zeros(L_a, 0, dtype=torch.float32)
-
-        home_minutes = torch.tensor([p["minutes_actual"] for p in home_players], dtype=torch.float32)
-        away_minutes = torch.tensor([p["minutes_actual"] for p in away_players], dtype=torch.float32)
-
-        home_rotation = torch.stack([p["rotation_target"] for p in home_players]) \
-            if home_players else torch.zeros(0, N_SEGMENTS, dtype=torch.float32)
-        away_rotation = torch.stack([p["rotation_target"] for p in away_players]) \
-            if away_players else torch.zeros(0, N_SEGMENTS, dtype=torch.float32)
-
-        pl_labels = self._player_labels.get(gid, [])
-        if pl_labels:
-            sup_pl_side = torch.tensor([p["side"] for p in pl_labels], dtype=torch.long)
-            sup_pl_slot = torch.tensor([p["slot"] for p in pl_labels], dtype=torch.long)
-            sup_pl_y = torch.stack([p["targets"] for p in pl_labels])
-        else:
-            sup_pl_side = torch.zeros(0, dtype=torch.long)
-            sup_pl_slot = torch.zeros(0, dtype=torch.long)
-            sup_pl_y = torch.zeros(0, K_BOX, dtype=torch.float32)
-
-        pairs = self._pairs.get(gid, [])
-        if pairs:
-            sup_pair_side = torch.tensor([p["side"] for p in pairs], dtype=torch.long)
-            sup_pair_off = torch.tensor([p["off_slot"] for p in pairs], dtype=torch.long)
-            sup_pair_def = torch.tensor([p["def_slot"] for p in pairs], dtype=torch.long)
-            sup_pair_y = torch.stack([p["targets"] for p in pairs])
-        else:
-            sup_pair_side = torch.zeros(0, dtype=torch.long)
-            sup_pair_off = torch.zeros(0, dtype=torch.long)
-            sup_pair_def = torch.zeros(0, dtype=torch.long)
-            sup_pair_y = torch.zeros(0, K_PAIR, dtype=torch.float32)
-
-        N_MIN, N_BOX = 48, K_BOX
-        mb_rows = sorted(self._minute_box.get(gid, []), key=lambda r: (r["side"], r["slot"]))
-        home_mb = [r for r in mb_rows if r["side"] == 0]
-        away_mb = [r for r in mb_rows if r["side"] == 1]
-        home_minute_box = torch.stack([r["stats"] for r in home_mb]) \
-            if home_mb else torch.zeros(L_h, N_MIN, N_BOX, dtype=torch.float32)
-        away_minute_box = torch.stack([r["stats"] for r in away_mb]) \
-            if away_mb else torch.zeros(L_a, N_MIN, N_BOX, dtype=torch.float32)
-
-        tabular = g["tabular"]
-        team_box_home = g["team_box_home"]
-        team_box_away = g["team_box_away"]
-
-        return {
-            "home_idx": home_idx,
-            "away_idx": away_idx,
-            "home_career_year_idx": home_career,
-            "away_career_year_idx": away_career,
-            "home_stats": home_stats,
-            "away_stats": away_stats,
-            "home_team_idx": torch.tensor(g["home_team_idx"], dtype=torch.long),
-            "away_team_idx": torch.tensor(g["away_team_idx"], dtype=torch.long),
-            "home_rest": torch.tensor(g["home_rest"], dtype=torch.float32),
-            "away_rest": torch.tensor(g["away_rest"], dtype=torch.float32),
-            "label": torch.tensor(g["label"], dtype=torch.float32),
-            "margin": torch.tensor(g["margin"], dtype=torch.float32),
-            "tabular": tabular,
-            "home_dec_odds": torch.tensor(g["home_dec_odds"], dtype=torch.float32),
-            "away_dec_odds": torch.tensor(g["away_dec_odds"], dtype=torch.float32),
-            "has_odds": torch.tensor(float(g["has_odds"]), dtype=torch.float32),
-            "team_box_home": team_box_home,
-            "team_box_away": team_box_away,
-            "sup_pair_side": sup_pair_side,
-            "sup_pair_off": sup_pair_off,
-            "sup_pair_def": sup_pair_def,
-            "sup_pair_y": sup_pair_y,
-            "sup_pl_side": sup_pl_side,
-            "sup_pl_slot": sup_pl_slot,
-            "sup_pl_y": sup_pl_y,
-            "home_minutes_actual": home_minutes,
-            "away_minutes_actual": away_minutes,
-            "home_pace_actual": torch.tensor(g["home_pace_actual"], dtype=torch.float32),
-            "away_pace_actual": torch.tensor(g["away_pace_actual"], dtype=torch.float32),
-            "home_minutes_valid": torch.tensor(float(g["home_minutes_valid"]), dtype=torch.float32),
-            "away_minutes_valid": torch.tensor(float(g["away_minutes_valid"]), dtype=torch.float32),
-            "home_rotation_target": home_rotation,
-            "away_rotation_target": away_rotation,
-            "home_rotation_valid": torch.tensor(float(g["home_rotation_valid"]), dtype=torch.float32),
-            "away_rotation_valid": torch.tensor(float(g["away_rotation_valid"]), dtype=torch.float32),
-            "home_minute_box": home_minute_box,
-            "away_minute_box": away_minute_box,
-        }
-
-
-def load_precomputed_window_info(db_path: str | Path) -> list[tuple[str, str]]:
-    """Return list of (window_start, window_end) available in the precomputed DB."""
-    conn = sqlite3.connect(str(db_path))
-    rows = conn.execute(
-        "SELECT DISTINCT window_start, window_end FROM games ORDER BY window_start"
-    ).fetchall()
-    conn.close()
-    return [(r[0], r[1]) for r in rows]
-
-
-def load_precomputed_vocab_size(db_path: str | Path, window_start: str) -> tuple[int, int]:
-    """Return (vocab_size, team_vocab_size) for a given window."""
-    conn = sqlite3.connect(str(db_path))
-    vs = conn.execute("SELECT value FROM meta WHERE key=?",
-                      (f"vocab_size_{window_start}",)).fetchone()
-    tvs = conn.execute("SELECT value FROM meta WHERE key=?",
-                       (f"team_vocab_size_{window_start}",)).fetchone()
-    conn.close()
-    return int(vs[0]), int(tvs[0])
-
-
 __all__ = [
     # constants
     "BOX_TARGETS", "K_BOX", "BOX_INDEX",
@@ -980,25 +773,20 @@ __all__ = [
     "MIN_TEAM_SUPERVISION_MINUTES",
     "MAX_CAREER_YEAR", "career_year_to_idx", "load_player_first_season",
     "load_player_debut",
-    "N_SEGMENTS",
     # pair indices
     "_PAIR_PTS_IDX", "_PAIR_FGM_IDX", "_PAIR_FGA_IDX", "_PAIR_3PM_IDX",
     "_PAIR_3PA_IDX", "_PAIR_AST_IDX", "_PAIR_TOV_IDX", "_PAIR_BLK_IDX",
     "_PLAYER_FTM_IDX", "_PLAYER_FTA_IDX", "_PLAYER_OREB_IDX",
     "_PLAYER_DREB_IDX", "_PLAYER_STL_IDX", "_PLAYER_PF_IDX",
-    # v5 record / dataset
-    "GameRecordV5", "build_records_v5", "build_vocab_from_records_v5",
-    "GameDatasetV5", "collate_v5",
-    # precomputed fast loader
-    "PrecomputedDatasetV5", "load_precomputed_window_info", "load_precomputed_vocab_size",
-    # v5 data loaders
-    "load_minute_presence", "load_regulation_scores",
-    # v4 minutes / pace / decisions (re-exported)
+    # v4 record / dataset
+    "GameRecordV4", "build_records_v4", "build_vocab_from_records_v4",
+    "GameDatasetV4", "collate_v4",
+    # v4 minutes / pace / decisions
     "BoxMinutesPace", "load_box_minutes_and_pace", "load_play_decisions",
     # default DB paths
     "DEFAULT_CORE_DB", "DEFAULT_FEATURES_DB", "DEFAULT_MATCHUP_DB",
     "DEFAULT_PLAYER_GAME_STATS_DB", "DEFAULT_PLAYER_DECISIONS_DB",
-    "DEFAULT_PLAYER_DEBUT_DB", "DEFAULT_V5_FEATURES_DB",
+    "DEFAULT_PLAYER_DEBUT_DB",
     # defaults
     "DEFAULT_LINEUP_DECAY", "DEFAULT_LINEUP_LOOKBACK_GAMES",
     "DEFAULT_PLAYER_FORM_DECAY", "DEFAULT_PLAYER_FORM_LOOKBACK",

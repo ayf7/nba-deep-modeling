@@ -32,7 +32,7 @@ from model import (  # noqa: E402
 )
 
 
-DEFAULT_OUTPUT_ROOT = REPO_ROOT / "models_cme_v6" / "artifacts"
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "nba_transformer" / "artifacts"
 DEFAULT_PRECOMPUTED_DB = REPO_ROOT / "data" / "features_v5_precomputed.db"
 
 
@@ -138,7 +138,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--precomputed-db", type=Path, default=DEFAULT_PRECOMPUTED_DB)
     p.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    p.add_argument("--run-name", type=str, default="backtest_v6")
+    p.add_argument("--run-name", type=str, default="nba_transformer")
     # arch
     p.add_argument("--d", type=int, default=64)
     p.add_argument("--n-heads", type=int, default=4)

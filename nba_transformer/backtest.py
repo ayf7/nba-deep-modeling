@@ -159,7 +159,7 @@ def parse_args():
     p.add_argument("--precomputed-db", type=Path,
                    default=REPO_ROOT / "data" / "features_v5_precomputed.db")
     p.add_argument("--output-dir", type=Path,
-                   default=REPO_ROOT / "models_cme_v6" / "artifacts" / "backtest_dec")
+                   default=REPO_ROOT / "nba_transformer" / "artifacts" / "backtest_dec")
     p.add_argument("--device", default="cuda")
     p.add_argument("--seed", type=int, default=42)
     # model
