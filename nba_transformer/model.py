@@ -1,4 +1,4 @@
-"""CME-v6 encoder-decoder model.
+"""NBA-Transformer encoder-decoder model.
 
 Encoder: player + team embeddings → self-attention over the roster.
 Decoder: cumulative game-state decoder with RoPE self-attention and
@@ -44,7 +44,7 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
 
 
 @dataclass
-class CmeV6Config:
+class NBATransformerConfig:
     vocab_size: int
     num_teams: int
     tabular_dim: int = 0
@@ -204,8 +204,8 @@ class CumStateDecoderBlock(nn.Module):
         return d_t, new_cache
 
 
-class CmeV6(nn.Module):
-    def __init__(self, cfg: CmeV6Config) -> None:
+class NBATransformer(nn.Module):
+    def __init__(self, cfg: NBATransformerConfig) -> None:
         super().__init__()
         self.cfg = cfg
         d = cfg.d

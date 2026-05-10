@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expanding-window monthly backtest for CME-v6 decoder model.
+"""Expanding-window monthly backtest for the NBA Transformer.
 
 Uses precomputed features DB. Supports --window-shards / --shard-idx for parallelism.
 Picks best val (AR) epoch by accuracy, reports test accuracy at that epoch.
@@ -20,8 +20,8 @@ from torch.utils.data import DataLoader
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cme_v5_common import PrecomputedDatasetV5, collate_v5, load_precomputed_window_info, load_precomputed_vocab_size
-from model import CmeV6, CmeV6Config, rotation_loss, box_cum_loss, win_hinge
+from dataset import PrecomputedDataset, collate, load_window_info, load_vocab_size
+from model import NBATransformer, NBATransformerConfig, rotation_loss, box_cum_loss, win_hinge
 
 
 def run_epoch_train(model, loader, optim, device, ss_ratio, w_delta):
@@ -70,18 +70,18 @@ def train_one_window(args, window_start, db_path):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    train_ds = PrecomputedDatasetV5(db_path, window_start, "train")
-    val_ds = PrecomputedDatasetV5(db_path, window_start, "val")
-    test_ds = PrecomputedDatasetV5(db_path, window_start, "test")
+    train_ds = PrecomputedDataset(db_path, window_start, "train")
+    val_ds = PrecomputedDataset(db_path, window_start, "val")
+    test_ds = PrecomputedDataset(db_path, window_start, "test")
 
     if len(test_ds) < 5:
         return None
 
-    vocab_size, team_vocab_size = load_precomputed_vocab_size(db_path, window_start)
+    vocab_size, team_vocab_size = load_vocab_size(db_path, window_start)
     sample = train_ds[0]
     stats_dim = sample["home_stats"].size(-1) if sample["home_stats"].numel() > 0 else 0
 
-    cfg = CmeV6Config(
+    cfg = NBATransformerConfig(
         vocab_size=vocab_size, num_teams=team_vocab_size,
         tabular_dim=sample["tabular"].numel(),
         d=args.d, n_heads=args.n_heads,
@@ -90,13 +90,13 @@ def train_one_window(args, window_start, db_path):
         player_stats_dim=stats_dim,
         use_player_embeddings=not args.no_player_emb,
     )
-    model = CmeV6(cfg).to(args.device)
+    model = NBATransformer(cfg).to(args.device)
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_v5)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_v5)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_v5)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
 
     best_val_acc = 0.0
     best_epoch = 0
@@ -190,12 +190,12 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     db_path = args.precomputed_db
-    windows = load_precomputed_window_info(db_path)
+    windows = load_window_info(db_path)
 
     # Filter to windows with test data
     valid_windows = []
     for ws, we in windows:
-        ds = PrecomputedDatasetV5(db_path, ws, "test")
+        ds = PrecomputedDataset(db_path, ws, "test")
         if len(ds) >= 5:
             valid_windows.append(ws)
     print(f"Total valid windows: {len(valid_windows)}")

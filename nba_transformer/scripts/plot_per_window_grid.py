@@ -28,7 +28,7 @@ MODELS = [
     ("Logistic", REPO_ROOT / "models_baseline" / "artifacts" / "backtest_logistic" / "predictions.csv"),
     ("XGBoost",  REPO_ROOT / "models_baseline" / "artifacts" / "backtest_xgboost" / "predictions.csv"),
     ("MLP",      REPO_ROOT / "models_baseline" / "artifacts" / "backtest_mlp" / "predictions.csv"),
-    ("Transformer", REPO_ROOT / "models_cme_v5" / "artifacts" / "full_backtest_d128" / "full_d128" / "predictions.csv"),
+    ("Transformer", REPO_ROOT / "nba_transformer" / "artifacts" / "betting_eval" / "predictions.csv"),
 ]
 
 SMOOTH_RES = 80

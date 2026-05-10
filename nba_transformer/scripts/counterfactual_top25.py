@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cme_v5_common import PrecomputedDatasetV5, collate_v5, load_precomputed_vocab_size
-from model import CmeV6, CmeV6Config
+from dataset import PrecomputedDataset, collate, load_vocab_size
+from model import NBATransformer, NBATransformerConfig
 
 DB = REPO_ROOT / "data" / "features_v5_precomputed.db"
 CKPT_DIR = REPO_ROOT / "nba_transformer" / "artifacts" / "backtest_dec" / "checkpoints"
@@ -55,17 +55,17 @@ EXCLUDE = {"Jayson Tatum", "Donovan Mitchell", "Paolo Banchero", "Tyrese Maxey"}
 
 def load_model(window):
     ckpt_path = CKPT_DIR / f"model_{window}.pt"
-    vocab_size, team_vocab_size = load_precomputed_vocab_size(DB, window)
-    train_ds = PrecomputedDatasetV5(DB, window, "train")
+    vocab_size, team_vocab_size = load_vocab_size(DB, window)
+    train_ds = PrecomputedDataset(DB, window, "train")
     sample = train_ds[0]
     stats_dim = sample["home_stats"].size(-1) if sample["home_stats"].numel() > 0 else 0
-    cfg = CmeV6Config(
+    cfg = NBATransformerConfig(
         vocab_size=vocab_size, num_teams=team_vocab_size,
         tabular_dim=sample["tabular"].numel(),
         d=32, n_heads=4, n_enc=2, n_dec=2,
         dropout=0.0, player_stats_dim=stats_dim,
     )
-    model = CmeV6(cfg).to(DEVICE)
+    model = NBATransformer(cfg).to(DEVICE)
     state = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
     model.load_state_dict(state)
     model.eval()
@@ -94,7 +94,7 @@ def measure_player_impact(model, ds, player_idx, bad_games):
         player_side = next(p["side"] for p in players if p["player_idx"] == player_idx)
 
         item = ds[idx]
-        p_base = get_win_prob(model, collate_v5([item]))
+        p_base = get_win_prob(model, collate([item]))
 
         item_mod = ds[idx]
         side_key = "home_idx" if player_side == 0 else "away_idx"
@@ -110,7 +110,7 @@ def measure_player_impact(model, ds, player_idx, bad_games):
         item_mod[cy_key] = item_mod[cy_key].clone()
         item_mod[cy_key][mask] = 0
 
-        p_mod = get_win_prob(model, collate_v5([item_mod]))
+        p_mod = get_win_prob(model, collate([item_mod]))
 
         if player_side == 0:
             delta = p_mod - p_base
@@ -132,7 +132,7 @@ def main():
 
         print(f"\nWindow {window}...")
         model = load_model(window)
-        test_ds = PrecomputedDatasetV5(DB, window, "test")
+        test_ds = PrecomputedDataset(DB, window, "test")
         print(f"  Test set: {len(test_ds)} games")
 
         # Find games with < 5 players on either side

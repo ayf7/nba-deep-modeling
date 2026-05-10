@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Counterfactual analysis with CME-v6.
+"""Counterfactual analysis with the NBA Transformer.
 
 Loads a checkpoint, runs inference on test games with modified lineups:
   - Remove a player (injury scenario)
@@ -22,11 +22,11 @@ from torch.utils.data import DataLoader
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cme_v5_common import (
-    PrecomputedDatasetV5, collate_v5,
-    load_precomputed_vocab_size,
+from dataset import (
+    PrecomputedDataset, collate,
+    load_vocab_size,
 )
-from model import CmeV6, CmeV6Config
+from model import NBATransformer, NBATransformerConfig
 
 DEFAULT_PRECOMPUTED_DB = REPO_ROOT / "data" / "features_v5_precomputed.db"
 DEFAULT_CKPT_DIR = REPO_ROOT / "nba_transformer" / "artifacts" / "backtest_dec" / "checkpoints"
@@ -58,18 +58,18 @@ TEAM_NAMES = {v: k for k, v in TEAM_IDS.items()}
 
 
 def load_model(ckpt_path, db_path, window_start, device):
-    vocab_size, team_vocab_size = load_precomputed_vocab_size(db_path, window_start)
-    train_ds = PrecomputedDatasetV5(db_path, window_start, "train")
+    vocab_size, team_vocab_size = load_vocab_size(db_path, window_start)
+    train_ds = PrecomputedDataset(db_path, window_start, "train")
     sample = train_ds[0]
     stats_dim = sample["home_stats"].size(-1) if sample["home_stats"].numel() > 0 else 0
 
-    cfg = CmeV6Config(
+    cfg = NBATransformerConfig(
         vocab_size=vocab_size, num_teams=team_vocab_size,
         tabular_dim=sample["tabular"].numel(),
         d=32, n_heads=4, n_enc=2, n_dec=2,
         dropout=0.0, player_stats_dim=stats_dim,
     )
-    model = CmeV6(cfg).to(device)
+    model = NBATransformer(cfg).to(device)
     state = torch.load(ckpt_path, map_location=device, weights_only=True)
     model.load_state_dict(state)
     model.eval()
@@ -147,7 +147,7 @@ def scenario_remove_player(model, ds, device, player_idx, player_name, team_abbr
 
         # Baseline
         item = ds[idx]
-        batch_base = collate_v5([item])
+        batch_base = collate([item])
         p_base = get_win_prob(model, batch_base, device)[0]
 
         # Modified: replace player_idx with 0 (UNK), zero their stats
@@ -163,7 +163,7 @@ def scenario_remove_player(model, ds, device, player_idx, player_name, team_abbr
         item_mod[stats_key][mask] = 0
         item_mod[cy_key] = item_mod[cy_key].clone()
         item_mod[cy_key][mask] = 0
-        batch_mod = collate_v5([item_mod])
+        batch_mod = collate([item_mod])
         p_mod = get_win_prob(model, batch_mod, device)[0]
 
         delta = p_mod - p_base
@@ -222,7 +222,7 @@ def scenario_trade_player(model, ds, device, player_idx, player_name,
 
         # Baseline
         item = ds[idx]
-        batch_base = collate_v5([item])
+        batch_base = collate([item])
         p_base = get_win_prob(model, batch_base, device)[0]
 
         # Modified: add player to destination team's lineup
@@ -245,7 +245,7 @@ def scenario_trade_player(model, ds, device, player_idx, player_name,
                 src_tensor[mask] = replacement_idx
                 item_mod[src_key] = src_tensor
 
-        batch_mod = collate_v5([item_mod])
+        batch_mod = collate([item_mod])
         p_mod = get_win_prob(model, batch_mod, device)[0]
 
         delta = p_mod - p_base
@@ -295,7 +295,7 @@ def main():
 
     print(f"Loading model for window {window}...")
     model = load_model(ckpt_path, db_path, window, args.device)
-    test_ds = PrecomputedDatasetV5(db_path, window, "test")
+    test_ds = PrecomputedDataset(db_path, window, "test")
     print(f"Test set: {len(test_ds)} games")
 
     # ---- Injury scenarios ----

@@ -4,8 +4,8 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from model import CmeV6
-from cme_v5_common import PrecomputedDatasetV5, collate_v5
+from model import NBATransformer
+from dataset import PrecomputedDataset, collate
 from torch.utils.data import DataLoader
 
 
@@ -173,11 +173,11 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
     cfg = ckpt["cfg"]
-    model = CmeV6(cfg).to(args.device)
+    model = NBATransformer(cfg).to(args.device)
     model.load_state_dict(ckpt["state_dict"])
 
-    ds = PrecomputedDatasetV5(args.precomputed_db, args.window, split="test")
-    loader = DataLoader(ds, batch_size=16, shuffle=False, collate_fn=collate_v5, num_workers=0)
+    ds = PrecomputedDataset(args.precomputed_db, args.window, split="test")
+    loader = DataLoader(ds, batch_size=16, shuffle=False, collate_fn=collate, num_workers=0)
 
     print(f"Window: {args.window} | n_test={len(ds)} | n_samples={args.n_samples} | tau={args.tau}")
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Betting evaluation for CME-v6 backtest checkpoints.
+"""Betting evaluation for NBA Transformer backtest checkpoints.
 
 Loads each window's checkpoint, runs AR inference on its test set,
 joins with moneyline odds from oddsportal_moneyline.sqlite (via game_date +
@@ -35,11 +35,11 @@ from matplotlib.patches import Rectangle
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cme_v5_common import (
-    PrecomputedDatasetV5, collate_v5,
-    load_precomputed_window_info, load_precomputed_vocab_size,
+from dataset import (
+    PrecomputedDataset, collate,
+    load_window_info, load_vocab_size,
 )
-from model import CmeV6, CmeV6Config
+from model import NBATransformer, NBATransformerConfig
 
 
 DEFAULT_CORE_DB = REPO_ROOT / "data" / "artifacts" / "nba_core.sqlite"
@@ -144,7 +144,7 @@ def load_odds_by_game_id(core_db, odds_db):
 
 @torch.no_grad()
 def predict_window(model, ds, device, batch_size):
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_v5)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate)
     all_probs = []
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -308,7 +308,7 @@ def plot_heatmap(df, output_path):
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
     ax.set_xlabel("market implied prob (home)")
     ax.set_ylabel("model predicted prob (home)")
-    ax.set_title(f"CME-v6 decoder · n={n}, naive-bet ROI={naive_roi*100:+.2f}%")
+    ax.set_title(f"NBA Transformer · n={n}, naive-bet ROI={naive_roi*100:+.2f}%")
     ax.legend(fontsize=8, loc="lower right")
     fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02, shrink=0.85, label="smoothed ROI per bet")
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -323,11 +323,11 @@ def main():
         return
     args.output_dir.mkdir(parents=True, exist_ok=True)
     db_path = args.precomputed_db
-    windows = load_precomputed_window_info(db_path)
+    windows = load_window_info(db_path)
 
     valid_windows = []
     for ws, we in windows:
-        ds = PrecomputedDatasetV5(db_path, ws, "test")
+        ds = PrecomputedDataset(db_path, ws, "test")
         if len(ds) >= 5:
             valid_windows.append(ws)
 
@@ -345,13 +345,13 @@ def main():
             print(f"  {ws}: no checkpoint, skipping")
             continue
 
-        test_ds = PrecomputedDatasetV5(db_path, ws, "test")
-        train_ds = PrecomputedDatasetV5(db_path, ws, "train")
-        vocab_size, team_vocab_size = load_precomputed_vocab_size(db_path, ws)
+        test_ds = PrecomputedDataset(db_path, ws, "test")
+        train_ds = PrecomputedDataset(db_path, ws, "train")
+        vocab_size, team_vocab_size = load_vocab_size(db_path, ws)
         sample = train_ds[0]
         stats_dim = sample["home_stats"].size(-1) if sample["home_stats"].numel() > 0 else 0
 
-        cfg = CmeV6Config(
+        cfg = NBATransformerConfig(
             vocab_size=vocab_size, num_teams=team_vocab_size,
             tabular_dim=sample["tabular"].numel(),
             d=args.d, n_heads=args.n_heads,
@@ -359,7 +359,7 @@ def main():
             dropout=args.dropout,
             player_stats_dim=stats_dim,
         )
-        model = CmeV6(cfg).to(args.device)
+        model = NBATransformer(cfg).to(args.device)
         state = torch.load(ckpt_path, map_location=args.device, weights_only=True)
         model.load_state_dict(state)
         model.eval()
@@ -447,10 +447,7 @@ COMPARE_MODELS = [
     ("logistic",  REPO_ROOT / "models_baseline" / "artifacts" / "backtest_logistic" / "predictions.csv"),
     ("xgboost",   REPO_ROOT / "models_baseline" / "artifacts" / "backtest_xgboost" / "predictions.csv"),
     ("mlp",       REPO_ROOT / "models_baseline" / "artifacts" / "backtest_mlp" / "predictions.csv"),
-    ("v5",        REPO_ROOT / "models_man_xfmr" / "artifacts" / "backtest_v5_pstats_2stream_apoiss10" / "predictions.csv"),
     ("cme_v1",    REPO_ROOT / "models_cme_v1" / "artifacts" / "backtest_v1" / "predictions.csv"),
-    ("cme_v2",    REPO_ROOT / "models_cme_v2" / "artifacts" / "backtest_s_tt" / "predictions.csv"),
-    ("cme_v4",    REPO_ROOT / "models_cme_v4" / "artifacts" / "full_v4" / "predictions.csv"),
     ("nba_transformer", REPO_ROOT / "nba_transformer" / "artifacts" / "betting_eval" / "predictions.csv"),
 ]
 

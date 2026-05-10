@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Expanding-window backtest for CME-v6 cumulative game-state decoder.
+"""Expanding-window training driver for the NBA-Transformer.
 
-Reuses the v5 precomputed-DB loader (data layer is shared). Trains
-per-minute rotation + cumulative box-score prediction + win logit.
+Trains per-minute rotation + cumulative box-score prediction + win logit
+using the precomputed feature database.
 """
 from __future__ import annotations
 
@@ -22,12 +22,12 @@ from torch.utils.data import DataLoader
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cme_v5_common import (  # noqa: E402
-    PrecomputedDatasetV5, collate_v5,
-    load_precomputed_window_info, load_precomputed_vocab_size,
+from dataset import (  # noqa: E402
+    PrecomputedDataset, collate,
+    load_window_info, load_vocab_size,
 )
 from model import (  # noqa: E402
-    CmeV6, CmeV6Config, total_loss_cumstate,
+    NBATransformer, NBATransformerConfig, total_loss_cumstate,
     rotation_loss, win_bce,
 )
 
@@ -198,7 +198,7 @@ def _aggregate_shards(out_dir: Path) -> None:
 
 def _run(args, out_dir):
     db_path = args.precomputed_db
-    windows = load_precomputed_window_info(db_path)
+    windows = load_window_info(db_path)
     if args.max_windows is not None:
         windows = windows[:args.max_windows]
     print(f"[precomputed] {db_path} — {len(windows)} windows available")
@@ -220,20 +220,20 @@ def _run(args, out_dir):
     for wi, (window_start, window_end) in enumerate(windows):
         t_window = time.time()
         t_load = time.time()
-        train_ds = PrecomputedDatasetV5(db_path, window_start, "train",
+        train_ds = PrecomputedDataset(db_path, window_start, "train",
                                         regular_season_only=args.regular_season_only)
-        val_ds = PrecomputedDatasetV5(db_path, window_start, "val",
+        val_ds = PrecomputedDataset(db_path, window_start, "val",
                                       regular_season_only=args.regular_season_only)
-        test_ds = PrecomputedDatasetV5(db_path, window_start, "test",
+        test_ds = PrecomputedDataset(db_path, window_start, "test",
                                        regular_season_only=args.regular_season_only)
         print(f"\n[window {wi+1}/{len(windows)}] {window_start} → {window_end} | "
               f"train={len(train_ds)} val={len(val_ds)} test={len(test_ds)} "
               f"(loaded in {time.time()-t_load:.1f}s)")
 
-        vocab_size, team_vocab_size = load_precomputed_vocab_size(db_path, window_start)
+        vocab_size, team_vocab_size = load_vocab_size(db_path, window_start)
         sample = train_ds[0]
         tabular_dim = sample["tabular"].numel()
-        cfg = CmeV6Config(
+        cfg = NBATransformerConfig(
             vocab_size=vocab_size, num_teams=team_vocab_size,
             tabular_dim=tabular_dim,
             d=args.d, n_heads=args.n_heads,
@@ -242,7 +242,7 @@ def _run(args, out_dir):
             side_on_team_only=args.side_on_team_only,
             player_stats_dim=sample["home_stats"].size(-1) if args.use_player_stats else 0,
         )
-        model = CmeV6(cfg).to(args.device)
+        model = NBATransformer(cfg).to(args.device)
         n_params = sum(p.numel() for p in model.parameters())
         print(f"  model params: {n_params:,}")
 
@@ -258,11 +258,11 @@ def _run(args, out_dir):
         scheduler = _build_lr_scheduler(optim, args.warmup_epochs, args.epochs)
 
         train_loader = DataLoader(train_ds, batch_size=args.batch_size,
-                                  shuffle=True, collate_fn=collate_v5)
+                                  shuffle=True, collate_fn=collate)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size,
-                                shuffle=False, collate_fn=collate_v5)
+                                shuffle=False, collate_fn=collate)
         test_loader = DataLoader(test_ds, batch_size=args.batch_size,
-                                 shuffle=False, collate_fn=collate_v5)
+                                 shuffle=False, collate_fn=collate)
 
         metric_higher_better = args.track_metric == "acc"
         best_val = float("-inf") if metric_higher_better else float("inf")

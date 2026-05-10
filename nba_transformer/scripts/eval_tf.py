@@ -4,8 +4,8 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from model import CmeV6
-from cme_v5_common import PrecomputedDatasetV5, collate_v5
+from model import NBATransformer
+from dataset import PrecomputedDataset, collate
 from torch.utils.data import DataLoader
 
 
@@ -44,15 +44,15 @@ def main():
         cfg = ckpt["cfg"]
         window = ckpt["window_start"]
 
-        model = CmeV6(cfg).to(args.device)
+        model = NBATransformer(cfg).to(args.device)
         model.load_state_dict(ckpt["state_dict"])
 
-        ds = PrecomputedDatasetV5(args.precomputed_db, window, split="test")
+        ds = PrecomputedDataset(args.precomputed_db, window, split="test")
         if len(ds) < 5:
             print(f"{window:>12} | {len(ds):>4} | {'skip':>8} | {'skip':>8} | {ckpt['best_epoch']:>3}")
             continue
         loader = DataLoader(ds, batch_size=64, shuffle=False,
-                            collate_fn=collate_v5, num_workers=0)
+                            collate_fn=collate, num_workers=0)
 
         bce, acc = eval_test(model, loader, args.device)
         print(f"{window:>12} | {len(ds):>4} | {bce:8.4f} | {acc*100:7.1f}% | {ckpt['best_epoch']:>3}")

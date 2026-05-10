@@ -9,7 +9,7 @@ top-5 lineup per minute against GT rotation. Reports:
 import argparse, sys, pathlib, torch, numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from model import CmeV6, CmeV6Config
+from model import NBATransformer, NBATransformerConfig
 
 
 def compute_ar_drift(model, loader, device):
@@ -113,16 +113,16 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
     cfg = ckpt["cfg"]
-    model = CmeV6(cfg).to(args.device)
+    model = NBATransformer(cfg).to(args.device)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
 
-    from cme_v5_common import PrecomputedDatasetV5, collate_v5
+    from dataset import PrecomputedDataset, collate
     from torch.utils.data import DataLoader
 
-    ds_test = PrecomputedDatasetV5(args.precomputed_db, args.window, split="test")
+    ds_test = PrecomputedDataset(args.precomputed_db, args.window, split="test")
     test_loader = DataLoader(ds_test, batch_size=32, shuffle=False,
-                             collate_fn=collate_v5, num_workers=0)
+                             collate_fn=collate, num_workers=0)
 
     print(f"Window: {args.window}")
     print(f"Test games: {len(ds_test)}")

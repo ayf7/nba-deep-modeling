@@ -22,8 +22,8 @@ import matplotlib.pyplot as plt
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cme_v5_common import PrecomputedDatasetV5, collate_v5, load_precomputed_vocab_size
-from model import CmeV6, CmeV6Config
+from dataset import PrecomputedDataset, collate, load_vocab_size
+from model import NBATransformer, NBATransformerConfig
 
 DB = REPO_ROOT / "data" / "features_v5_precomputed.db"
 CKPT_DIR = REPO_ROOT / "nba_transformer" / "artifacts" / "backtest_dec" / "checkpoints"
@@ -46,17 +46,17 @@ class EncoderWinHead(nn.Module):
 
 
 def load_model(window):
-    vocab_size, team_vocab_size = load_precomputed_vocab_size(DB, window)
-    train_ds = PrecomputedDatasetV5(DB, window, "train")
+    vocab_size, team_vocab_size = load_vocab_size(DB, window)
+    train_ds = PrecomputedDataset(DB, window, "train")
     sample = train_ds[0]
     stats_dim = sample["home_stats"].size(-1) if sample["home_stats"].numel() > 0 else 0
-    cfg = CmeV6Config(
+    cfg = NBATransformerConfig(
         vocab_size=vocab_size, num_teams=team_vocab_size,
         tabular_dim=sample["tabular"].numel(),
         d=32, n_heads=4, n_enc=2, n_dec=2,
         dropout=0.0, player_stats_dim=stats_dim,
     )
-    model = CmeV6(cfg).to(DEVICE)
+    model = NBATransformer(cfg).to(DEVICE)
     ckpt = CKPT_DIR / f"model_{window}.pt"
     state = torch.load(ckpt, map_location=DEVICE, weights_only=True)
     model.load_state_dict(state)
@@ -150,10 +150,10 @@ def main():
 
     for window in WINDOWS:
         print(f"\nWindow {window}")
-        train_ds = PrecomputedDatasetV5(DB, window, "train")
-        test_ds = PrecomputedDatasetV5(DB, window, "test")
-        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, collate_fn=collate_v5)
-        test_loader = DataLoader(test_ds, batch_size=32, shuffle=False, collate_fn=collate_v5)
+        train_ds = PrecomputedDataset(DB, window, "train")
+        test_ds = PrecomputedDataset(DB, window, "test")
+        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, collate_fn=collate)
+        test_loader = DataLoader(test_ds, batch_size=32, shuffle=False, collate_fn=collate)
         print(f"  Train: {len(train_ds)}, Test: {len(test_ds)} games")
 
         # Full model

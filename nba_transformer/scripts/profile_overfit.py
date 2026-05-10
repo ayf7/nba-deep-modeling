@@ -18,8 +18,8 @@ from torch.utils.data import DataLoader
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cme_v5_common import PrecomputedDatasetV5, collate_v5, load_precomputed_window_info, load_precomputed_vocab_size
-from model import CmeV6, CmeV6Config, rotation_loss, box_cum_loss, win_bce, win_hinge
+from dataset import PrecomputedDataset, collate, load_window_info, load_vocab_size
+from model import NBATransformer, NBATransformerConfig, rotation_loss, box_cum_loss, win_bce, win_hinge
 
 
 def prediction_stats(out, batch, Lh):
@@ -181,18 +181,18 @@ def main():
     args = p.parse_args()
 
     db_path = REPO_ROOT / "data" / "features_v5_precomputed.db"
-    windows = load_precomputed_window_info(db_path)
+    windows = load_window_info(db_path)
     window_start = windows[0][0]
 
-    train_ds = PrecomputedDatasetV5(db_path, window_start, "train")
-    val_ds = PrecomputedDatasetV5(db_path, window_start, "val")
-    test_ds = PrecomputedDatasetV5(db_path, window_start, "test")
+    train_ds = PrecomputedDataset(db_path, window_start, "train")
+    val_ds = PrecomputedDataset(db_path, window_start, "val")
+    test_ds = PrecomputedDataset(db_path, window_start, "test")
     print(f"train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 
-    vocab_size, team_vocab_size = load_precomputed_vocab_size(db_path, window_start)
+    vocab_size, team_vocab_size = load_vocab_size(db_path, window_start)
     sample = train_ds[0]
     stats_dim = sample["home_stats"].size(-1) if sample["home_stats"].numel() > 0 else 0
-    cfg = CmeV6Config(
+    cfg = NBATransformerConfig(
         vocab_size=vocab_size, num_teams=team_vocab_size,
         tabular_dim=sample["tabular"].numel(),
         d=args.d, n_heads=args.n_heads,
@@ -201,16 +201,16 @@ def main():
         player_stats_dim=stats_dim,
         use_player_embeddings=not args.no_player_emb,
     )
-    model = CmeV6(cfg).to(args.device)
+    model = NBATransformer(cfg).to(args.device)
     n_params = sum(p.numel() for p in model.parameters())
     n_train_samples = len(train_ds)
     print(f"params: {n_params:,} | train samples: {n_train_samples} | ratio: {n_params/n_train_samples:.1f} params/sample")
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_v5)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_v5)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_v5)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate)
 
     # Epoch 0: untrained baseline
     print("\n--- Epoch 0 (untrained) ---")
