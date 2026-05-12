@@ -16,7 +16,7 @@ ARTIFACT_ROOT = PROJECT_ROOT / "data" / "artifacts"
 DEFAULT_DATASET_DIR = PROJECT_ROOT / "external_repos" / "nba_data" / "datasets"
 DEFAULT_OUTPUT = ARTIFACT_ROOT / "nba_raw.sqlite"
 
-NBA_SOURCES = ("cdnnba", "nbastatsv3", "shotdetail", "matchups")
+NBA_SOURCES = ("cdnnba", "nbastatsv3", "shotdetail", "matchups", "pbpstats")
 
 
 def quote_ident(value: str) -> str:
