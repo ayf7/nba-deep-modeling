@@ -8,11 +8,11 @@ The main onboarding goal is:
 1. create the Python/sqlite environment
 2. build the local SQLite databases under `data/artifacts`
 3. run a baseline train or backtest
-4. move on to the CME world-model family when the data layer is working
+4. move on to the NBA-Transformer when the data layer is working
 
-The active modeling direction is CME-v1/v2/v3. The older v5 / Man Transformer
-code is still kept as a useful reference point and counterfactual baseline, but
-new architecture work should generally start from the CME models.
+The active modeling direction is the NBA-Transformer — an encoder-decoder over
+per-minute player rotations that jointly predicts lineup usage, cumulative box
+scores, and game outcome.
 
 Generated databases and model outputs are intentionally ignored by git.
 
@@ -324,94 +324,40 @@ bets.csv
 monthly_summary.csv
 ```
 
-## Train Player-Aware Models
+## Train the NBA-Transformer
 
 Once the core, feature, matchup, injury, and calibration artifacts exist, the
-active CME models can be trained.
-
-CME-v1 smoke run:
-
-```bash
-python models_cme_v1/scripts/train_cme_v1.py \
-  --run-name smoke \
-  --smoke
-```
-
-CME-v2 smoke run:
+NBA-Transformer can be trained. The model reads from a precomputed feature
+database for fast iteration:
 
 ```bash
-python models_cme_v2/scripts/train_cme_v2.py \
-  --run-name smoke \
-  --smoke
+python nba_transformer/train.py \
+  --run-name nba_transformer \
+  --precomputed-db data/features_v5_precomputed.db
 ```
 
-CME-v3 smoke run:
+For real runs add `--device cuda` when a GPU is available.
+
+## Backtest the NBA-Transformer
+
+The backtest retrains one model per monthly window. Parallelize across windows
+by sharding:
 
 ```bash
-python models_cme_v3/scripts/train_cme_v3.py \
-  --run-name smoke \
-  --smoke
+python nba_transformer/backtest.py \
+  --window-shards 4 --shard-idx 0 \
+  --precomputed-db data/features_v5_precomputed.db \
+  --device cuda
 ```
 
-The v5 / Man Transformer path is retained for comparison and legacy
-counterfactuals:
+Launch all shards in parallel, then aggregate:
 
 ```bash
-python models_man_xfmr/scripts/train_man_xfmr.py \
-  --run-name smoke \
-  --smoke
+python nba_transformer/backtest.py --aggregate-only
 ```
 
-For real runs, remove `--smoke`, set a useful `--run-name`, and use
-`--device cuda` when a GPU is available.
-
-## Backtest Player-Aware Models
-
-Neural backtests are much more expensive than the tabular baselines because
-they retrain one model per monthly window.
-
-CME-v1:
-
-```bash
-python models_cme_v1/scripts/backtest_cme_v1.py \
-  --run-name backtest_cme_v1 \
-  --save-checkpoints
-```
-
-CME-v2 one-window smoke backtest:
-
-```bash
-python models_cme_v2/scripts/backtest_cme_v2.py \
-  --run-name backtest_cme_v2_smoke \
-  --max-windows 1
-```
-
-CME-v2 full backtest:
-
-```bash
-python models_cme_v2/scripts/backtest_cme_v2.py \
-  --run-name backtest_s_tt \
-  --save-checkpoints
-```
-
-CME-v3 one-window smoke backtest:
-
-```bash
-python models_cme_v3/scripts/backtest_cme_v3.py \
-  --run-name backtest_cme_v3_smoke \
-  --max-windows 1
-```
-
-The v5 / Man Transformer backtest remains available as a legacy comparison:
-
-```bash
-python models_man_xfmr/scripts/backtest_man_xfmr.py \
-  --run-name backtest_man_xfmr \
-  --save-checkpoints
-```
-
-The neural backtest prediction CSVs use the same broad schema as the baseline
-backtests, so they can usually be fed into the same betting-evaluation scripts.
+The prediction CSVs use the same broad schema as the baseline backtests, so
+they can be fed into the same betting-evaluation scripts.
 
 ## Repository Map
 
@@ -424,21 +370,13 @@ models_baseline/
   scripts/          # logistic, XGBoost, MLP, backtests, betting eval
   artifacts/        # ignored baseline outputs
 
-models_cme_v1/
-  scripts/          # constrained matchup-event model
-  artifacts/        # ignored CME-v1 outputs
-
-models_cme_v2/
-  scripts/          # structured stat/world-model experiments
-  artifacts/        # ignored CME-v2 outputs
-
-models_cme_v3/
-  scripts/          # active CME world-model iteration
-  artifacts/        # ignored CME-v3 outputs
-
-models_man_xfmr/
-  scripts/          # legacy v5 player-aware transformer and counterfactuals
-  artifacts/        # ignored v5 outputs
+nba_transformer/
+  dataset.py        # precomputed-feature dataset and collate
+  model.py          # encoder-decoder architecture and losses
+  train.py          # single-window training entrypoint
+  backtest.py       # expanding-window monthly backtest (shardable)
+  scripts/          # eval, plotting, counterfactual, ablation
+  artifacts/        # ignored NBA-Transformer outputs
 
 docs/
   context.md        # project-level research context
